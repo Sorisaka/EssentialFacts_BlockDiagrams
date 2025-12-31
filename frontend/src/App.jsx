@@ -10,6 +10,10 @@ const GRID_STEP = 12
 const NODE_GAP = 12
 const DEFAULT_ROW_HEIGHT = 140
 const DEFAULT_NODE_HEIGHT = 160
+const COLUMN_MIN_WIDTH = 360
+
+const HIRAGANA = 'あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん'.split('')
+const KATAKANA = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン'.split('')
 
 const createDefaultDiagram = () => {
   const columnId = uid()
@@ -32,8 +36,8 @@ const createDefaultDiagram = () => {
         y: 0,
         title: '最初のノード',
         items: [
-          { id: uid(), text: '要素1', mark: 'circle' },
-          { id: uid(), text: '要素2', mark: 'triangle' },
+          { id: uid(), text: '要素1', mark: 'circle', label: '' },
+          { id: uid(), text: '要素2', mark: 'triangle', label: '' },
         ],
       },
     ],
@@ -48,19 +52,65 @@ const markToSymbol = MARKS.reduce((acc, cur) => ({ ...acc, [cur.key]: cur.label 
 
 const snap = (value) => Math.round(value / GRID_STEP) * GRID_STEP
 
+const nextLabel = (seq, index) => {
+  const base = seq[index % seq.length]
+  const cycle = Math.floor(index / seq.length)
+  return cycle === 0 ? base : `${base}${cycle + 1}`
+}
+
+const ensureItemLabels = (diagram) => {
+  const columnOrder = [...diagram.columns].sort((a, b) => a.order - b.order)
+  const columnIndexMap = Object.fromEntries(columnOrder.map((col, idx) => [col.id, idx]))
+  let hiraIndex = 0
+  let kataIndex = 0
+  let changed = false
+  const nodesById = {}
+
+  columnOrder.forEach((col) => {
+    const nodesInColumn = diagram.nodes
+      .filter((n) => n.columnId === col.id)
+      .sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || a.id.localeCompare(b.id))
+    nodesInColumn.forEach((node) => {
+      let nodeChanged = false
+      const updatedItems = node.items.map((item) => {
+        const existing = item.label ?? ''
+        if (existing.trim()) return item
+        const colIndex = columnIndexMap[col.id] ?? 0
+        const label = colIndex % 2 === 0 ? nextLabel(HIRAGANA, hiraIndex++) : nextLabel(KATAKANA, kataIndex++)
+        nodeChanged = true
+        changed = true
+        return { ...item, label }
+      })
+      if (nodeChanged) {
+        nodesById[node.id] = { ...node, items: updatedItems }
+      }
+    })
+  })
+
+  if (!changed) return { diagram, changed }
+  return {
+    diagram: { ...diagram, nodes: diagram.nodes.map((node) => nodesById[node.id] || node) },
+    changed,
+  }
+}
+
 const migrateDiagram = (diagram) => {
   const migratedNodes = diagram.nodes.map((node) => {
     const y = node.y != null ? node.y : node.row * DEFAULT_ROW_HEIGHT
     const fixedMarkItems = node.items.map((item) => {
-      if (typeof item.mark === 'number') {
-        const markKeys = Object.keys(markToSymbol)
-        return { ...item, mark: markKeys[item.mark] || 'none' }
-      }
-      return item
+      const normalizedMark = (() => {
+        if (typeof item.mark === 'number') {
+          const markKeys = Object.keys(markToSymbol)
+          return markKeys[item.mark] || 'none'
+        }
+        return item.mark ?? 'none'
+      })()
+      return { ...item, mark: normalizedMark, label: item.label ?? '' }
     })
     return { ...node, y: snap(y), items: fixedMarkItems }
   })
-  return { ...diagram, nodes: migratedNodes }
+  const { diagram: labeledDiagram } = ensureItemLabels({ ...diagram, nodes: migratedNodes })
+  return labeledDiagram
 }
 
 export default function App() {
@@ -76,6 +126,7 @@ export default function App() {
   const [connectMode, setConnectMode] = useState(false)
   const [pendingSource, setPendingSource] = useState(null)
   const [layoutVersion, setLayoutVersion] = useState(0)
+  const [columnWidths, setColumnWidths] = useState({})
   const isInitializing = useRef(true)
   const columnRefs = useRef({})
   const nodeRefs = useRef({})
@@ -191,6 +242,39 @@ export default function App() {
       setLayoutVersion((v) => v + 1)
     })
   }
+
+  useEffect(() => {
+    const { diagram: withLabels, changed } = ensureItemLabels(currentDiagram)
+    if (changed) {
+      setCurrentDiagram(withLabels)
+      setDirty(true)
+    }
+  }, [currentDiagram.columns, currentDiagram.nodes])
+
+  useEffect(() => {
+    const observers = []
+    const observeColumn = (colId, el) => {
+      if (!el) return
+      const updateWidth = (width) => {
+        setColumnWidths((prev) => {
+          if (Math.abs((prev[colId] ?? 0) - width) < 1) return prev
+          return { ...prev, [colId]: width }
+        })
+      }
+      const measure = () => {
+        const needed = Math.max(COLUMN_MIN_WIDTH, Math.ceil(el.scrollWidth))
+        updateWidth(needed)
+        requestLayout()
+      }
+      const observer = new ResizeObserver(() => requestAnimationFrame(measure))
+      observer.observe(el)
+      measure()
+      observers.push(observer)
+    }
+
+    sortedColumns.forEach((col) => observeColumn(col.id, columnRefs.current[col.id]))
+    return () => observers.forEach((o) => o.disconnect())
+  }, [sortedColumns, columnRefs])
 
   const updateDiagram = (updater) => {
     setCurrentDiagram((prev) => {
@@ -363,7 +447,7 @@ export default function App() {
             row,
             y,
             title: '新規ノード',
-            items: [{ id: uid(), text: '新規項目', mark: 'circle' }],
+            items: [{ id: uid(), text: '新規項目', mark: 'circle', label: '' }],
           },
         ],
         rowCount: Math.max(prev.rowCount, row + 1),
@@ -394,7 +478,7 @@ export default function App() {
       ...prev,
       nodes: prev.nodes.map((node) =>
         node.id === nodeId
-          ? { ...node, items: [...node.items, { id: uid(), text: '追加項目', mark: 'none' }] }
+          ? { ...node, items: [...node.items, { id: uid(), text: '追加項目', mark: 'none', label: '' }] }
           : node
       ),
     }))
@@ -451,7 +535,7 @@ export default function App() {
       row,
       y,
       title: template.nodeTitle,
-      items: template.items.map((item) => ({ id: uid(), text: item.text, mark: item.markDefault || 'none' })),
+      items: template.items.map((item) => ({ id: uid(), text: item.text, mark: item.markDefault || 'none', label: '' })),
     }
     updateDiagram((prev) => ({
       ...prev,
@@ -637,7 +721,15 @@ export default function App() {
             {sortedColumns.map((column) => {
               const nodesInColumn = nodesByColumn[column.id] || []
               return (
-                <div key={column.id} className="column" ref={(el) => (columnRefs.current[column.id] = el)}>
+                <div
+                  key={column.id}
+                  className="column"
+                  ref={(el) => (columnRefs.current[column.id] = el)}
+                  style={{
+                    minWidth: `${COLUMN_MIN_WIDTH}px`,
+                    width: columnWidths[column.id] ? `${columnWidths[column.id]}px` : undefined,
+                  }}
+                >
                   <div className="column-header">
                     <input
                       value={column.title}
@@ -678,14 +770,15 @@ export default function App() {
                                 setSelected({ type: 'item', id: item.id, nodeId: node.id, columnId: column.id })
                               }}
                             >
-                              <MarkSelector
-                                compact
-                                value={item.mark}
-                                onChange={(mark) =>
+                              <input
+                                className="item-label"
+                                value={item.label ?? ''}
+                                onChange={(e) =>
                                   handleUpdateNode(node.id, {
-                                    items: node.items.map((it) => (it.id === item.id ? { ...it, mark } : it)),
+                                    items: node.items.map((it) => (it.id === item.id ? { ...it, label: e.target.value.trim() } : it)),
                                   })
                                 }
+                                maxLength={2}
                               />
                               <input
                                 value={item.text}
@@ -695,12 +788,20 @@ export default function App() {
                                   })
                                 }
                               />
-                              <span className={`mark mark-${item.mark}`} title={item.mark}>
-                                {markToSymbol[item.mark]}
-                              </span>
-                              <button className="ghost" onClick={() => handleDeleteItem(node.id, item.id)}>
-                                削除
-                              </button>
+                              <div className="item-actions">
+                                <MarkSelector
+                                  compact
+                                  value={item.mark}
+                                  onChange={(mark) =>
+                                    handleUpdateNode(node.id, {
+                                      items: node.items.map((it) => (it.id === item.id ? { ...it, mark } : it)),
+                                    })
+                                  }
+                                />
+                                <button className="ghost" onClick={() => handleDeleteItem(node.id, item.id)}>
+                                  削除
+                                </button>
+                              </div>
                             </li>
                           ))}
                         </ul>

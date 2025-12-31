@@ -261,11 +261,12 @@ button.fullwidth {
   background: #f8fafc;
   border-radius: 12px;
   border: 1px solid #e2e8f0;
-  width: 320px;
   padding: 10px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 360px;
+  flex: 0 0 auto;
 }
 
 .column-header {
@@ -341,7 +342,7 @@ button.fullwidth {
 
 .item-row {
   display: grid;
-  grid-template-columns: 72px 1fr 64px 68px;
+  grid-template-columns: 64px 1fr 160px;
   align-items: center;
   gap: 6px;
   padding: 4px 0;
@@ -356,6 +357,19 @@ button.fullwidth {
   padding: 6px 8px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
+}
+
+.item-label {
+  width: 3em;
+  text-align: center;
+}
+
+.item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 150px;
+  justify-content: flex-end;
 }
 
 .mark {

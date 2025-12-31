@@ -1,111 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react'
 
+import { computeEdgeRoutes } from '../edgeRouting'
+
 const strokeColor = '#475569'
-const ANCHOR_PAD = 8
-
-const routeSingleEdge = (from, to) => {
-  if (!from || !to) return []
-  if (from.x === to.x || from.y === to.y) return [from, to]
-  return [from, { x: from.x, y: to.y }, to]
-}
-
-const clamp = (v, min, max) => Math.max(min, Math.min(max, v))
-
-const getAnchorPoint = (rect, side, preferredY) => {
-  if (!rect) return null
-  const y = clamp(preferredY, rect.top + ANCHOR_PAD, rect.bottom - ANCHOR_PAD)
-  if (side === 'left') return { x: rect.left, y }
-  if (side === 'right') return { x: rect.right, y }
-  if (side === 'top') return { x: clamp(rect.left + (rect.width || 0) / 2, rect.left + ANCHOR_PAD, rect.right - ANCHOR_PAD), y: rect.top }
-  return { x: clamp(rect.left + (rect.width || 0) / 2, rect.left + ANCHOR_PAD, rect.right - ANCHOR_PAD), y: rect.bottom }
-}
-
-const buildRoutes = (diagram, columns, nodeRects) => {
-  const columnOrder = {}
-  columns.forEach((c, idx) => (columnOrder[c.id] = idx))
-  const nodeById = Object.fromEntries(diagram.nodes.map((n) => [n.id, n]))
-  const portByNode = {}
-  diagram.nodes.forEach((node) => {
-    const rect = nodeRects[node.id]
-    if (!rect) return
-    const centerY = (rect.top + rect.bottom) / 2
-    portByNode[node.id] = {
-      inPort: getAnchorPoint(rect, 'left', centerY),
-      outPort: getAnchorPoint(rect, 'right', centerY),
-    }
-  })
-
-  const grouped = {}
-  diagram.edges.forEach((edge) => {
-    const source = nodeById[edge.fromNodeId]
-    const target = nodeById[edge.toNodeId]
-    if (!source || !target) return
-    const direction =
-      edge.direction && edge.direction !== 'auto'
-        ? edge.direction
-        : columnOrder[source.columnId] <= columnOrder[target.columnId]
-        ? 'ltr'
-        : 'rtl'
-    const sourcePort = direction === 'ltr' ? portByNode[source.id]?.outPort : portByNode[source.id]?.inPort
-    const targetPort = direction === 'ltr' ? portByNode[target.id]?.inPort : portByNode[target.id]?.outPort
-    if (!sourcePort || !targetPort) return
-    const key = `${target.id}-${direction}`
-    if (!grouped[key]) grouped[key] = { target, direction, edges: [] }
-    grouped[key].edges.push({ edge, sourcePort, targetPort })
-  })
-
-  const routes = []
-  const mergeDots = []
-
-  Object.values(grouped).forEach((group) => {
-    const { target, direction, edges } = group
-    const targetRect = nodeRects[target.id]
-    const targetPort = direction === 'ltr' ? portByNode[target.id]?.inPort : portByNode[target.id]?.outPort
-    const preferredY = targetPort?.y ?? (targetRect ? (targetRect.top + targetRect.bottom) / 2 : 0)
-    if (edges.length === 1) {
-      const [single] = edges
-      const points = routeSingleEdge(single.sourcePort, single.targetPort)
-      routes.push({
-        id: single.edge.id,
-        points,
-        markerEnd: 'arrowhead',
-        targetId: target.id,
-      })
-      return
-    }
-
-    const candidateX = direction === 'ltr' ? portByNode[target.id]?.inPort?.x : portByNode[target.id]?.outPort?.x
-    if (candidateX == null) return
-    const candidateYs = [preferredY, ...edges.map((item) => item.sourcePort.y)]
-    let bestY = preferredY
-    let bestCost = Number.POSITIVE_INFINITY
-    candidateYs.forEach((y) => {
-      const cost = edges.reduce((acc, item) => acc + Math.abs(item.sourcePort.y - y), Math.abs(preferredY - y))
-      if (cost < bestCost) {
-        bestCost = cost
-        bestY = y
-      }
-    })
-    const mergePoint = { x: candidateX, y: bestY }
-    mergeDots.push(mergePoint)
-
-    const trunkTarget = targetPort
-    const trunkPoints = routeSingleEdge(mergePoint, trunkTarget)
-    routes.push({
-      id: `${target.id}-${direction}-trunk`,
-      points: trunkPoints,
-      markerEnd: 'arrowhead',
-      targetId: target.id,
-    })
-
-    edges.forEach((item) => {
-      const branchPoints = routeSingleEdge(item.sourcePort, mergePoint)
-      routes.push({ id: item.edge.id, points: branchPoints, markerEnd: null, targetId: target.id })
-    })
-  })
-
-  return { routes, mergeDots }
-}
 
 const buildSegments = (routes) => {
   const segments = []
@@ -187,7 +84,16 @@ export function EdgeLayer({ diagram, columns, columnRefs, nodeRefs, canvasRef, v
     return boundariesMap
   }, [columns, columnRefs, canvasRef, version])
 
-  const { routes, mergeDots } = useMemo(() => buildRoutes(diagram, columns, nodeRects, boundaries), [diagram, columns, nodeRects, boundaries])
+  const { routes, debug } = useMemo(
+    () => computeEdgeRoutes(diagram, columns, nodeRects, boundaries),
+    [diagram, columns, nodeRects, boundaries]
+  )
+
+  useEffect(() => {
+    if (debug?.length) {
+      console.debug('edge-routing', debug)
+    }
+  }, [debug])
 
   const jumpers = useMemo(() => findJumpers(buildSegments(routes)), [routes])
 
@@ -217,11 +123,9 @@ export function EdgeLayer({ diagram, columns, columnRefs, nodeRefs, canvasRef, v
           fill="none"
           stroke={strokeColor}
           strokeWidth="2.5"
+          strokeLinejoin="round"
           markerEnd={route.markerEnd ? 'url(#arrowhead)' : undefined}
         />
-      ))}
-      {mergeDots.map((dot, idx) => (
-        <circle key={`merge-${idx}`} cx={dot.x} cy={dot.y} r={4} fill={strokeColor} />
       ))}
       {jumpers.map((jump, idx) => (
         <path key={`jump-${idx}`} d={`M ${jump.x} ${jump.y - 6} A 6 6 0 0 1 ${jump.x} ${jump.y + 6}`} fill="none" stroke={strokeColor} strokeWidth="2.5" />
