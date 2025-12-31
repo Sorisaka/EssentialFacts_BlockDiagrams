@@ -1,6 +1,20 @@
 const LANE_SPACING = 10
-const SPLIT_OFFSET_X = 32
-const MERGE_OFFSET_X = 32
+
+// Rect helper: returns the geometric center of a node box
+const getRectCenter = (rect) => ({ x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 })
+
+const anchorInfoForRect = (rect) => {
+  const center = getRectCenter(rect)
+  return {
+    center,
+    inAnchor: { x: rect.left, y: center.y },
+    outAnchor: { x: rect.right, y: center.y },
+  }
+}
+
+const nextLaneOffset = (index) => index * LANE_SPACING
+
+const manhattan = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y)
 
 const dedupePoints = (points) =>
   points.filter((p, idx) => {
@@ -9,54 +23,49 @@ const dedupePoints = (points) =>
     return prev.x !== p.x || prev.y !== p.y
   })
 
-const nextLaneOffset = (index) => index * LANE_SPACING
-
-const anchorInfoForRect = (rect) => {
-  const centerY = (rect.top + rect.bottom) / 2
-  return {
-    inAnchor: { x: rect.left, y: centerY },
-    outAnchor: { x: rect.right, y: centerY },
-    splitJunction: { x: rect.right + SPLIT_OFFSET_X, y: centerY },
-    mergeJunction: { x: rect.left - MERGE_OFFSET_X, y: centerY },
-  }
+// Pick a junction based on the shortest edge in the group so the shared trunk stays compact
+const junctionForGroup = (edges, sourceBoundary, targetBoundary) => {
+  if (!edges.length) return null
+  const shortest = edges.reduce((acc, cur) => {
+    const distance = manhattan(cur.sourceAnchor, cur.targetAnchor)
+    if (!acc || distance < acc.distance) return { ...cur, distance }
+    return acc
+  }, null)
+  const gapStart = sourceBoundary ?? shortest.sourceAnchor.x
+  const gapEnd = targetBoundary ?? shortest.targetAnchor.x
+  const junctionX = (gapStart + gapEnd) / 2
+  const junctionY = (shortest.sourceAnchor.y + shortest.targetAnchor.y) / 2
+  return { junctionX, junctionY }
 }
 
-const buildRoute = (edge, anchorMap, boundaries, laneIndex, useSplit, useMerge) => {
-  const sourceAnchors = anchorMap[edge.source.id]
-  const targetAnchors = anchorMap[edge.target.id]
-  if (!sourceAnchors || !targetAnchors) return null
+const buildRoute = (edge, junction, boundaries, laneIndex = 0) => {
+  const { direction, source, target, sourceAnchor, targetAnchor } = edge
+  const sourceBoundaryX = direction === 'ltr' ? boundaries[source.columnId]?.right : boundaries[source.columnId]?.left
+  const targetBoundaryX = direction === 'ltr' ? boundaries[target.columnId]?.left : boundaries[target.columnId]?.right
+  if (sourceBoundaryX == null || targetBoundaryX == null) return null
 
-  const sourceAnchor = sourceAnchors.outAnchor
-  const targetAnchor = targetAnchors.inAnchor
-  const sourceBoundaryX = boundaries?.[edge.source.columnId]?.right ?? sourceAnchor.x
-  const targetBoundaryX = boundaries?.[edge.target.columnId]?.left ?? targetAnchor.x
+  const trunkOffset = nextLaneOffset(laneIndex)
+  const junctionX = junction?.junctionX != null ? junction.junctionX : (sourceBoundaryX + targetBoundaryX) / 2
+  const shiftedJunctionX =
+    direction === 'ltr'
+      ? Math.min(junctionX, targetBoundaryX - trunkOffset)
+      : Math.max(junctionX, targetBoundaryX + trunkOffset)
+  const junctionY = junction?.junctionY ?? (sourceAnchor.y + targetAnchor.y) / 2
 
-  const split = useSplit ? sourceAnchors.splitJunction : null
-  const merge = useMerge ? targetAnchors.mergeJunction : null
-
-  const points = [sourceAnchor]
-
-  if (split) points.push({ x: split.x, y: sourceAnchor.y })
-
-  const exitX = Math.max(sourceBoundaryX, split?.x ?? sourceAnchor.x)
-  points.push({ x: exitX, y: sourceAnchor.y })
-
-  const baseMidX = ((merge?.x ?? targetBoundaryX) + exitX) / 2
-  const midX = baseMidX + nextLaneOffset(laneIndex)
-  points.push({ x: midX, y: sourceAnchor.y })
-
-  const junctionY = merge?.y ?? targetAnchor.y
-  points.push({ x: midX, y: junctionY })
-
-  const approachX = merge?.x ?? targetBoundaryX
-  points.push({ x: approachX, y: junctionY })
-
-  points.push(targetAnchor)
+  const points = dedupePoints([
+    sourceAnchor,
+    { x: sourceBoundaryX, y: sourceAnchor.y },
+    { x: shiftedJunctionX, y: sourceAnchor.y },
+    { x: shiftedJunctionX, y: junctionY },
+    { x: shiftedJunctionX, y: targetAnchor.y },
+    { x: targetBoundaryX, y: targetAnchor.y },
+    targetAnchor,
+  ])
 
   return {
     id: edge.edge.id,
-    points: dedupePoints(points),
-    targetId: edge.target.id,
+    points,
+    targetId: target.id,
   }
 }
 
@@ -72,34 +81,40 @@ export function computeEdgeRoutes(diagram, columns, nodeRects, boundaries) {
     const source = nodeById[edge.fromNodeId]
     const target = nodeById[edge.toNodeId]
     if (!source || !target) return
-    if (!anchorMap[source.id] || !anchorMap[target.id]) return
-    edges.push({ edge, source, target })
+    const sourceAnchors = anchorMap[source.id]
+    const targetAnchors = anchorMap[target.id]
+    if (!sourceAnchors || !targetAnchors) return
+    const direction = sourceAnchors.center.x <= targetAnchors.center.x ? 'ltr' : 'rtl'
+    const sourceAnchor = sourceAnchors.outAnchor
+    const targetAnchor = targetAnchors.inAnchor
+    edges.push({ edge, source, target, direction, sourceAnchor, targetAnchor })
   })
 
-  const incomingCounts = {}
-  const outgoingCounts = {}
-  edges.forEach((edge) => {
-    incomingCounts[edge.target.id] = (incomingCounts[edge.target.id] ?? 0) + 1
-    outgoingCounts[edge.source.id] = (outgoingCounts[edge.source.id] ?? 0) + 1
-  })
-
-  const laneIndexByEdgeId = {}
-  const edgesByTargetColumn = {}
+  const targetGroups = {}
+  const sourceGroups = {}
 
   edges.forEach((edge) => {
-    const colId = edge.target.columnId
-    if (!edgesByTargetColumn[colId]) edgesByTargetColumn[colId] = []
-    edgesByTargetColumn[colId].push(edge)
+    const targetKey = `T:${edge.target.id}:${edge.direction}`
+    const sourceKey = `S:${edge.source.id}:${edge.direction}`
+    if (!targetGroups[targetKey]) targetGroups[targetKey] = { key: targetKey, edges: [], target: edge.target }
+    if (!sourceGroups[sourceKey]) sourceGroups[sourceKey] = { key: sourceKey, edges: [], source: edge.source }
+    targetGroups[targetKey].edges.push(edge)
+    sourceGroups[sourceKey].edges.push(edge)
   })
 
-  Object.values(edgesByTargetColumn).forEach((list) => {
+  const laneOrderByTargetColumn = {}
+  Object.values(targetGroups).forEach((group) => {
+    const colId = group.edges[0]?.target.columnId
+    if (!colId) return
+    if (!laneOrderByTargetColumn[colId]) laneOrderByTargetColumn[colId] = []
+    laneOrderByTargetColumn[colId].push(group)
+  })
+
+  Object.values(laneOrderByTargetColumn).forEach((list) => {
     list.sort((a, b) => {
-      const targetA = anchorMap[a.target.id]?.inAnchor?.y ?? 0
-      const targetB = anchorMap[b.target.id]?.inAnchor?.y ?? 0
-      return targetA - targetB
-    })
-    list.forEach((edge, idx) => {
-      laneIndexByEdgeId[edge.edge.id] = idx
+      const ay = a.edges[0]?.targetAnchor?.y ?? 0
+      const by = b.edges[0]?.targetAnchor?.y ?? 0
+      return ay - by
     })
   })
 
@@ -107,10 +122,37 @@ export function computeEdgeRoutes(diagram, columns, nodeRects, boundaries) {
   const debug = []
 
   edges.forEach((edge) => {
-    const laneIndex = laneIndexByEdgeId[edge.edge.id] ?? 0
-    const useSplit = outgoingCounts[edge.source.id] > 1
-    const useMerge = incomingCounts[edge.target.id] > 1
-    const route = buildRoute(edge, anchorMap, boundaries, laneIndex, useSplit, useMerge)
+    const targetKey = `T:${edge.target.id}:${edge.direction}`
+    const sourceKey = `S:${edge.source.id}:${edge.direction}`
+    const targetGroup = targetGroups[targetKey]
+    const sourceGroup = sourceGroups[sourceKey]
+    const useTargetGrouping = targetGroup?.edges.length >= 2
+    const useSourceGrouping = !useTargetGrouping && sourceGroup?.edges.length >= 2
+
+    let junction = null
+    let laneIndex = 0
+    if (useTargetGrouping) {
+      const group = targetGroup
+      const sourceBoundary = boundaries?.[edge.source.columnId]?.right
+      const targetBoundary = boundaries?.[edge.target.columnId]?.left
+      const reverseTargetBoundary = boundaries?.[edge.target.columnId]?.right
+      const sourceSide = edge.direction === 'ltr' ? sourceBoundary : boundaries?.[edge.source.columnId]?.left
+      const targetSide = edge.direction === 'ltr' ? targetBoundary : reverseTargetBoundary
+      junction = junctionForGroup(group.edges, sourceSide, targetSide)
+      laneIndex = laneOrderByTargetColumn[edge.target.columnId]?.indexOf(group) ?? 0
+      debug.push({ targetId: edge.target.id, junction })
+    } else if (useSourceGrouping) {
+      const group = sourceGroup
+      const sourceBoundary = boundaries?.[edge.source.columnId]?.right
+      const sourceBoundaryLeft = boundaries?.[edge.source.columnId]?.left
+      const targetBoundary = boundaries?.[edge.target.columnId]?.left
+      const targetBoundaryRight = boundaries?.[edge.target.columnId]?.right
+      const sourceSide = edge.direction === 'ltr' ? sourceBoundary : sourceBoundaryLeft
+      const targetSide = edge.direction === 'ltr' ? targetBoundary : targetBoundaryRight
+      junction = junctionForGroup(group.edges, sourceSide, targetSide)
+    }
+
+    const route = buildRoute(edge, junction, boundaries, laneIndex)
     if (route) routes.push(route)
   })
 
