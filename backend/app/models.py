@@ -20,6 +20,7 @@ class NodeItem(BaseModel):
     id: str
     text: str
     mark: Mark = Mark.none
+    label: Optional[str] = None
     note: Optional[str] = None
 
 

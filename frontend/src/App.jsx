@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { MarkSelector, MARKS } from './components/MarkSelector'
 import { TemplateList } from './components/TemplateList'
 import { PropertiesPanel } from './components/PropertiesPanel'
@@ -10,6 +10,51 @@ const GRID_STEP = 12
 const NODE_GAP = 12
 const DEFAULT_ROW_HEIGHT = 140
 const DEFAULT_NODE_HEIGHT = 160
+const COLUMN_MIN_WIDTH = 360
+
+const HIRAGANA = 'あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん'.split('')
+const KATAKANA = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン'.split('')
+const ROMAN = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
+
+const classifyLabel = (label) => {
+  if (!label) return 'other'
+  const first = label[0]
+  if (HIRAGANA.includes(first)) return 'hiragana'
+  if (KATAKANA.includes(first)) return 'katakana'
+  if (/^[0-9]+$/.test(label)) return 'number'
+  if (/^[A-Za-z]+$/.test(label)) return 'roman'
+  return 'other'
+}
+
+const nextFromSeq = (seq, used, counter) => {
+  let idx = counter.current
+  while (true) {
+    const candidate = nextLabel(seq, idx)
+    idx += 1
+    if (!used.has(candidate)) {
+      counter.current = idx
+      return candidate
+    }
+  }
+}
+
+const nextNumber = (used, counter) => {
+  let n = counter.current
+  while (used.has(String(n))) {
+    n += 1
+  }
+  counter.current = n + 1
+  return String(n)
+}
+
+const nextRoman = (used, counter) => nextFromSeq(ROMAN, used, counter)
+
+const nextOther = (base, used) => {
+  if (!used.has(base)) return base
+  let n = 2
+  while (used.has(`${base}${n}`)) n += 1
+  return `${base}${n}`
+}
 
 const createDefaultDiagram = () => {
   const columnId = uid()
@@ -32,8 +77,8 @@ const createDefaultDiagram = () => {
         y: 0,
         title: '最初のノード',
         items: [
-          { id: uid(), text: '要素1', mark: 'circle' },
-          { id: uid(), text: '要素2', mark: 'triangle' },
+          { id: uid(), text: '要素1', mark: 'circle', label: '' },
+          { id: uid(), text: '要素2', mark: 'triangle', label: '' },
         ],
       },
     ],
@@ -48,19 +93,110 @@ const markToSymbol = MARKS.reduce((acc, cur) => ({ ...acc, [cur.key]: cur.label 
 
 const snap = (value) => Math.round(value / GRID_STEP) * GRID_STEP
 
+const nextLabel = (seq, index) => {
+  const base = seq[index % seq.length]
+  const cycle = Math.floor(index / seq.length)
+  return cycle === 0 ? base : `${base}${cycle + 1}`
+}
+
+// Enforces item labels to be unique per parity (奇数/偶数列) and per label type
+const ensureItemLabels = (diagram) => {
+  const columnOrder = [...diagram.columns].sort((a, b) => a.order - b.order)
+  const columnIndexMap = Object.fromEntries(columnOrder.map((col, idx) => [col.id, idx]))
+  const counters = {
+    odd: {
+      hiragana: { current: 0 },
+      katakana: { current: 0 },
+      number: { current: 1 },
+      roman: { current: 0 },
+    },
+    even: {
+      hiragana: { current: 0 },
+      katakana: { current: 0 },
+      number: { current: 1 },
+      roman: { current: 0 },
+    },
+  }
+  const usedMap = {
+    odd: { hiragana: new Set(), katakana: new Set(), number: new Set(), roman: new Set(), other: new Set() },
+    even: { hiragana: new Set(), katakana: new Set(), number: new Set(), roman: new Set(), other: new Set() },
+  }
+  const markUsed = (scopeKey, label) => {
+    const type = classifyLabel(label)
+    const targetSet = usedMap[scopeKey][type] || usedMap[scopeKey].other
+    targetSet.add(label)
+  }
+  let changed = false
+  const nodesById = {}
+
+  columnOrder.forEach((col) => {
+    const nodesInColumn = diagram.nodes
+      .filter((n) => n.columnId === col.id)
+      .sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || a.id.localeCompare(b.id))
+    nodesInColumn.forEach((node) => {
+      let nodeChanged = false
+      const updatedItems = node.items.map((item) => {
+        const colIndex = columnIndexMap[col.id] ?? 0
+        const scopeKey = colIndex % 2 === 0 ? 'even' : 'odd'
+        const existing = (item.label ?? '').trim()
+        const labelType = classifyLabel(existing)
+        const used = usedMap[scopeKey][labelType] || usedMap[scopeKey].other
+
+        const pickLabel = () => {
+          if (labelType === 'hiragana') return nextFromSeq(HIRAGANA, used, counters[scopeKey].hiragana)
+          if (labelType === 'katakana') return nextFromSeq(KATAKANA, used, counters[scopeKey].katakana)
+          if (labelType === 'number') return nextNumber(used, counters[scopeKey].number)
+          if (labelType === 'roman') return nextRoman(used, counters[scopeKey].roman)
+          return nextOther(existing || nextFromSeq(HIRAGANA, used, counters[scopeKey].hiragana), used)
+        }
+
+        let label = existing
+        if (!label) {
+          label = scopeKey === 'even'
+            ? nextFromSeq(HIRAGANA, usedMap[scopeKey].hiragana, counters[scopeKey].hiragana)
+            : nextFromSeq(KATAKANA, usedMap[scopeKey].katakana, counters[scopeKey].katakana)
+        } else if (used.has(label)) {
+          label = pickLabel()
+        }
+
+        markUsed(scopeKey, label)
+        if (label !== item.label) {
+          nodeChanged = true
+          changed = true
+          return { ...item, label }
+        }
+        return item
+      })
+      if (nodeChanged) {
+        nodesById[node.id] = { ...node, items: updatedItems }
+      }
+    })
+  })
+
+  if (!changed) return { diagram, changed }
+  return {
+    diagram: { ...diagram, nodes: diagram.nodes.map((node) => nodesById[node.id] || node) },
+    changed,
+  }
+}
+
 const migrateDiagram = (diagram) => {
   const migratedNodes = diagram.nodes.map((node) => {
     const y = node.y != null ? node.y : node.row * DEFAULT_ROW_HEIGHT
     const fixedMarkItems = node.items.map((item) => {
-      if (typeof item.mark === 'number') {
-        const markKeys = Object.keys(markToSymbol)
-        return { ...item, mark: markKeys[item.mark] || 'none' }
-      }
-      return item
+      const normalizedMark = (() => {
+        if (typeof item.mark === 'number') {
+          const markKeys = Object.keys(markToSymbol)
+          return markKeys[item.mark] || 'none'
+        }
+        return item.mark ?? 'none'
+      })()
+      return { ...item, mark: normalizedMark, label: item.label ?? '' }
     })
     return { ...node, y: snap(y), items: fixedMarkItems }
   })
-  return { ...diagram, nodes: migratedNodes }
+  const { diagram: labeledDiagram } = ensureItemLabels({ ...diagram, nodes: migratedNodes })
+  return labeledDiagram
 }
 
 export default function App() {
@@ -76,12 +212,18 @@ export default function App() {
   const [connectMode, setConnectMode] = useState(false)
   const [pendingSource, setPendingSource] = useState(null)
   const [layoutVersion, setLayoutVersion] = useState(0)
+  const [columnWidths, setColumnWidths] = useState({})
   const isInitializing = useRef(true)
   const columnRefs = useRef({})
   const nodeRefs = useRef({})
   const nodeHeightsRef = useRef({})
   const layoutJob = useRef(null)
   const canvasRef = useRef(null)
+  const dragState = useRef({ active: false, nodeId: null, startY: 0, pointerStartY: 0, pendingY: null })
+  const dragFrame = useRef(null)
+  const isDraggingRef = useRef(false)
+  const requestLayoutRef = useRef(null)
+  const updateDiagramRef = useRef(null)
 
   useLayoutEffect(() => {
     columnRefs.current = {}
@@ -187,10 +329,49 @@ export default function App() {
     if (layoutJob.current) cancelAnimationFrame(layoutJob.current)
     layoutJob.current = requestAnimationFrame(() => {
       layoutJob.current = null
-      resolveCollisions()
+      if (!isDraggingRef.current) {
+        resolveCollisions()
+      }
       setLayoutVersion((v) => v + 1)
     })
   }
+
+  useEffect(() => {
+    requestLayoutRef.current = requestLayout
+  }, [requestLayout])
+
+  useEffect(() => {
+    const { diagram: withLabels, changed } = ensureItemLabels(currentDiagram)
+    if (changed) {
+      setCurrentDiagram(withLabels)
+      setDirty(true)
+    }
+  }, [currentDiagram.columns, currentDiagram.nodes])
+
+  useEffect(() => {
+    const observers = []
+    const observeColumn = (colId, el) => {
+      if (!el) return
+      const updateWidth = (width) => {
+        setColumnWidths((prev) => {
+          if (Math.abs((prev[colId] ?? 0) - width) < 1) return prev
+          return { ...prev, [colId]: width }
+        })
+      }
+      const measure = () => {
+        const needed = Math.max(COLUMN_MIN_WIDTH, Math.ceil(el.scrollWidth))
+        updateWidth(needed)
+        requestLayout()
+      }
+      const observer = new ResizeObserver(() => requestAnimationFrame(measure))
+      observer.observe(el)
+      measure()
+      observers.push(observer)
+    }
+
+    sortedColumns.forEach((col) => observeColumn(col.id, columnRefs.current[col.id]))
+    return () => observers.forEach((o) => o.disconnect())
+  }, [sortedColumns, columnRefs])
 
   const updateDiagram = (updater) => {
     setCurrentDiagram((prev) => {
@@ -200,6 +381,10 @@ export default function App() {
       return next
     })
   }
+
+  useEffect(() => {
+    updateDiagramRef.current = updateDiagram
+  }, [updateDiagram])
 
   const syncDiagramListName = (diagram) => {
     setDiagramList((prev) => {
@@ -363,7 +548,7 @@ export default function App() {
             row,
             y,
             title: '新規ノード',
-            items: [{ id: uid(), text: '新規項目', mark: 'circle' }],
+            items: [{ id: uid(), text: '新規項目', mark: 'circle', label: '' }],
           },
         ],
         rowCount: Math.max(prev.rowCount, row + 1),
@@ -394,7 +579,7 @@ export default function App() {
       ...prev,
       nodes: prev.nodes.map((node) =>
         node.id === nodeId
-          ? { ...node, items: [...node.items, { id: uid(), text: '追加項目', mark: 'none' }] }
+          ? { ...node, items: [...node.items, { id: uid(), text: '追加項目', mark: 'none', label: '' }] }
           : node
       ),
     }))
@@ -451,7 +636,7 @@ export default function App() {
       row,
       y,
       title: template.nodeTitle,
-      items: template.items.map((item) => ({ id: uid(), text: item.text, mark: item.markDefault || 'none' })),
+      items: template.items.map((item) => ({ id: uid(), text: item.text, mark: item.markDefault || 'none', label: '' })),
     }
     updateDiagram((prev) => ({
       ...prev,
@@ -509,6 +694,82 @@ export default function App() {
     }
     setSelected({ type: 'node', id: node.id, columnId })
   }
+
+  const applyDragUpdate = useCallback(() => {
+    const { nodeId, pendingY } = dragState.current
+    if (!nodeId || pendingY == null) return
+    updateDiagramRef.current((prev) => ({
+      ...prev,
+      nodes: prev.nodes.map((node) =>
+        node.id === nodeId ? { ...node, y: pendingY, row: Math.round(pendingY / DEFAULT_ROW_HEIGHT) } : node
+      ),
+    }))
+    requestLayoutRef.current?.()
+  }, [])
+
+  const handleNodePointerMove = useCallback(
+    (event) => {
+      const state = dragState.current
+      if (!state.active) return
+      event.preventDefault()
+      const delta = event.clientY - state.pointerStartY
+      const nextY = Math.max(0, snap(state.startY + delta))
+      if (state.pendingY === nextY) return
+      state.pendingY = nextY
+      if (!dragFrame.current) {
+        dragFrame.current = requestAnimationFrame(() => {
+          dragFrame.current = null
+          applyDragUpdate()
+        })
+      }
+    },
+    [applyDragUpdate]
+  )
+
+  const handleNodePointerUp = useCallback(
+    (event) => {
+      if (dragState.current.active) {
+        if (event) handleNodePointerMove(event)
+        dragState.current = { active: false, nodeId: null, startY: 0, pointerStartY: 0, pendingY: null }
+        isDraggingRef.current = false
+        window.removeEventListener('pointermove', handleNodePointerMove)
+        window.removeEventListener('pointerup', handleNodePointerUp)
+        window.removeEventListener('pointercancel', handleNodePointerUp)
+        requestLayoutRef.current?.()
+      }
+    },
+    [handleNodePointerMove]
+  )
+
+  const handleNodeDragStart = useCallback(
+    (event, node) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      setSelected({ type: 'node', id: node.id, columnId: node.columnId })
+      dragState.current = {
+        active: true,
+        nodeId: node.id,
+        startY: node.y ?? 0,
+        pointerStartY: event.clientY,
+        pendingY: node.y ?? 0,
+      }
+      isDraggingRef.current = true
+      window.addEventListener('pointermove', handleNodePointerMove)
+      window.addEventListener('pointerup', handleNodePointerUp)
+      window.addEventListener('pointercancel', handleNodePointerUp)
+    },
+    [handleNodePointerMove, handleNodePointerUp]
+  )
+
+  useEffect(() => {
+    return () => {
+      window.removeEventListener('pointermove', handleNodePointerMove)
+      window.removeEventListener('pointerup', handleNodePointerUp)
+      window.removeEventListener('pointercancel', handleNodePointerUp)
+      if (dragFrame.current) cancelAnimationFrame(dragFrame.current)
+    }
+  }, [handleNodePointerMove, handleNodePointerUp])
 
   const resolveCollisions = () => {
     const heights = nodeHeightsRef.current
@@ -632,12 +893,21 @@ export default function App() {
             nodeRefs={nodeRefs}
             canvasRef={canvasRef}
             version={layoutVersion}
+            onDeleteEdge={handleDeleteEdge}
           />
           <div className="columns">
             {sortedColumns.map((column) => {
               const nodesInColumn = nodesByColumn[column.id] || []
               return (
-                <div key={column.id} className="column" ref={(el) => (columnRefs.current[column.id] = el)}>
+                <div
+                  key={column.id}
+                  className="column"
+                  ref={(el) => (columnRefs.current[column.id] = el)}
+                  style={{
+                    minWidth: `${COLUMN_MIN_WIDTH}px`,
+                    width: columnWidths[column.id] ? `${columnWidths[column.id]}px` : undefined,
+                  }}
+                >
                   <div className="column-header">
                     <input
                       value={column.title}
@@ -663,6 +933,12 @@ export default function App() {
                         onClick={() => handleSelectNode(node, column.id)}
                         style={{ top: `${node.y ?? 0}px` }}
                       >
+                        <div className="node-handle" onPointerDown={(event) => handleNodeDragStart(event, node)}>
+                          <span aria-hidden className="node-handle__grip">
+                            ⇅
+                          </span>
+                          <span className="node-handle__hint">ドラッグで上下移動</span>
+                        </div>
                         <input
                           className="node-title"
                           value={node.title}
@@ -678,14 +954,15 @@ export default function App() {
                                 setSelected({ type: 'item', id: item.id, nodeId: node.id, columnId: column.id })
                               }}
                             >
-                              <MarkSelector
-                                compact
-                                value={item.mark}
-                                onChange={(mark) =>
+                              <input
+                                className="item-label"
+                                value={item.label ?? ''}
+                                onChange={(e) =>
                                   handleUpdateNode(node.id, {
-                                    items: node.items.map((it) => (it.id === item.id ? { ...it, mark } : it)),
+                                    items: node.items.map((it) => (it.id === item.id ? { ...it, label: e.target.value.trim() } : it)),
                                   })
                                 }
+                                maxLength={2}
                               />
                               <input
                                 value={item.text}
@@ -695,12 +972,20 @@ export default function App() {
                                   })
                                 }
                               />
-                              <span className={`mark mark-${item.mark}`} title={item.mark}>
-                                {markToSymbol[item.mark]}
-                              </span>
-                              <button className="ghost" onClick={() => handleDeleteItem(node.id, item.id)}>
-                                削除
-                              </button>
+                              <div className="item-actions">
+                                <MarkSelector
+                                  compact
+                                  value={item.mark}
+                                  onChange={(mark) =>
+                                    handleUpdateNode(node.id, {
+                                      items: node.items.map((it) => (it.id === item.id ? { ...it, mark } : it)),
+                                    })
+                                  }
+                                />
+                                <button className="ghost" onClick={() => handleDeleteItem(node.id, item.id)}>
+                                  削除
+                                </button>
+                              </div>
                             </li>
                           ))}
                         </ul>

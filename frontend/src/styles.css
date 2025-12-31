@@ -261,11 +261,12 @@ button.fullwidth {
   background: #f8fafc;
   border-radius: 12px;
   border: 1px solid #e2e8f0;
-  width: 320px;
   padding: 10px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 360px;
+  flex: 0 0 auto;
 }
 
 .column-header {
@@ -319,6 +320,32 @@ button.fullwidth {
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
 }
 
+.node-handle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  margin: -6px -6px 8px;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  cursor: grab;
+  user-select: none;
+}
+
+.node-handle:active {
+  cursor: grabbing;
+}
+
+.node-handle__grip {
+  font-weight: 700;
+}
+
+.node-handle__hint {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
 .node-title {
   font-weight: 700;
   margin-bottom: 8px;
@@ -341,7 +368,7 @@ button.fullwidth {
 
 .item-row {
   display: grid;
-  grid-template-columns: 72px 1fr 64px 68px;
+  grid-template-columns: 64px 1fr 160px;
   align-items: center;
   gap: 6px;
   padding: 4px 0;
@@ -356,6 +383,19 @@ button.fullwidth {
   padding: 6px 8px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
+}
+
+.item-label {
+  width: 3em;
+  text-align: center;
+}
+
+.item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 150px;
+  justify-content: flex-end;
 }
 
 .mark {
