@@ -69,11 +69,6 @@ export function EdgeLayer({ diagram, columns, columnRefs, nodeRefs, canvasRef, v
 
   return (
     <svg className="edge-layer" width={size.width} height={size.height}>
-      <defs>
-        <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-          <path d="M0,0 L8,3 L0,6" fill={strokeColor} />
-        </marker>
-      </defs>
       {routes.map((route) => (
         <polyline
           key={route.id}
@@ -82,7 +77,6 @@ export function EdgeLayer({ diagram, columns, columnRefs, nodeRefs, canvasRef, v
           stroke={strokeColor}
           strokeWidth="2.5"
           strokeLinejoin="round"
-          markerEnd={route.markerEnd ? 'url(#arrowhead)' : undefined}
           onContextMenu={(event) => {
             event.preventDefault()
             event.stopPropagation()
