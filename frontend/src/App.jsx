@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { MarkSelector, MARKS } from './components/MarkSelector'
 import { TemplateList } from './components/TemplateList'
 import { PropertiesPanel } from './components/PropertiesPanel'
@@ -219,6 +219,11 @@ export default function App() {
   const nodeHeightsRef = useRef({})
   const layoutJob = useRef(null)
   const canvasRef = useRef(null)
+  const dragState = useRef({ active: false, nodeId: null, startY: 0, pointerStartY: 0, pendingY: null })
+  const dragFrame = useRef(null)
+  const isDraggingRef = useRef(false)
+  const requestLayoutRef = useRef(null)
+  const updateDiagramRef = useRef(null)
 
   useLayoutEffect(() => {
     columnRefs.current = {}
@@ -324,10 +329,16 @@ export default function App() {
     if (layoutJob.current) cancelAnimationFrame(layoutJob.current)
     layoutJob.current = requestAnimationFrame(() => {
       layoutJob.current = null
-      resolveCollisions()
+      if (!isDraggingRef.current) {
+        resolveCollisions()
+      }
       setLayoutVersion((v) => v + 1)
     })
   }
+
+  useEffect(() => {
+    requestLayoutRef.current = requestLayout
+  }, [requestLayout])
 
   useEffect(() => {
     const { diagram: withLabels, changed } = ensureItemLabels(currentDiagram)
@@ -370,6 +381,10 @@ export default function App() {
       return next
     })
   }
+
+  useEffect(() => {
+    updateDiagramRef.current = updateDiagram
+  }, [updateDiagram])
 
   const syncDiagramListName = (diagram) => {
     setDiagramList((prev) => {
@@ -680,6 +695,82 @@ export default function App() {
     setSelected({ type: 'node', id: node.id, columnId })
   }
 
+  const applyDragUpdate = useCallback(() => {
+    const { nodeId, pendingY } = dragState.current
+    if (!nodeId || pendingY == null) return
+    updateDiagramRef.current((prev) => ({
+      ...prev,
+      nodes: prev.nodes.map((node) =>
+        node.id === nodeId ? { ...node, y: pendingY, row: Math.round(pendingY / DEFAULT_ROW_HEIGHT) } : node
+      ),
+    }))
+    requestLayoutRef.current?.()
+  }, [])
+
+  const handleNodePointerMove = useCallback(
+    (event) => {
+      const state = dragState.current
+      if (!state.active) return
+      event.preventDefault()
+      const delta = event.clientY - state.pointerStartY
+      const nextY = Math.max(0, snap(state.startY + delta))
+      if (state.pendingY === nextY) return
+      state.pendingY = nextY
+      if (!dragFrame.current) {
+        dragFrame.current = requestAnimationFrame(() => {
+          dragFrame.current = null
+          applyDragUpdate()
+        })
+      }
+    },
+    [applyDragUpdate]
+  )
+
+  const handleNodePointerUp = useCallback(
+    (event) => {
+      if (dragState.current.active) {
+        if (event) handleNodePointerMove(event)
+        dragState.current = { active: false, nodeId: null, startY: 0, pointerStartY: 0, pendingY: null }
+        isDraggingRef.current = false
+        window.removeEventListener('pointermove', handleNodePointerMove)
+        window.removeEventListener('pointerup', handleNodePointerUp)
+        window.removeEventListener('pointercancel', handleNodePointerUp)
+        requestLayoutRef.current?.()
+      }
+    },
+    [handleNodePointerMove]
+  )
+
+  const handleNodeDragStart = useCallback(
+    (event, node) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      setSelected({ type: 'node', id: node.id, columnId: node.columnId })
+      dragState.current = {
+        active: true,
+        nodeId: node.id,
+        startY: node.y ?? 0,
+        pointerStartY: event.clientY,
+        pendingY: node.y ?? 0,
+      }
+      isDraggingRef.current = true
+      window.addEventListener('pointermove', handleNodePointerMove)
+      window.addEventListener('pointerup', handleNodePointerUp)
+      window.addEventListener('pointercancel', handleNodePointerUp)
+    },
+    [handleNodePointerMove, handleNodePointerUp]
+  )
+
+  useEffect(() => {
+    return () => {
+      window.removeEventListener('pointermove', handleNodePointerMove)
+      window.removeEventListener('pointerup', handleNodePointerUp)
+      window.removeEventListener('pointercancel', handleNodePointerUp)
+      if (dragFrame.current) cancelAnimationFrame(dragFrame.current)
+    }
+  }, [handleNodePointerMove, handleNodePointerUp])
+
   const resolveCollisions = () => {
     const heights = nodeHeightsRef.current
     const updatedNodes = [...currentDiagram.nodes]
@@ -802,6 +893,7 @@ export default function App() {
             nodeRefs={nodeRefs}
             canvasRef={canvasRef}
             version={layoutVersion}
+            onDeleteEdge={handleDeleteEdge}
           />
           <div className="columns">
             {sortedColumns.map((column) => {
@@ -841,6 +933,12 @@ export default function App() {
                         onClick={() => handleSelectNode(node, column.id)}
                         style={{ top: `${node.y ?? 0}px` }}
                       >
+                        <div className="node-handle" onPointerDown={(event) => handleNodeDragStart(event, node)}>
+                          <span aria-hidden className="node-handle__grip">
+                            ⇅
+                          </span>
+                          <span className="node-handle__hint">ドラッグで上下移動</span>
+                        </div>
                         <input
                           className="node-title"
                           value={node.title}

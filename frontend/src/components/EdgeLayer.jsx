@@ -4,47 +4,7 @@ import { computeEdgeRoutes } from '../edgeRouting'
 
 const strokeColor = '#475569'
 
-const buildSegments = (routes) => {
-  const segments = []
-  routes.forEach((route) => {
-    for (let i = 0; i < route.points.length - 1; i += 1) {
-      const p1 = route.points[i]
-      const p2 = route.points[i + 1]
-      const horizontal = p1.y === p2.y
-      segments.push({
-        x1: p1.x,
-        y1: p1.y,
-        x2: p2.x,
-        y2: p2.y,
-        horizontal,
-      })
-    }
-  })
-  return segments
-}
-
-const findJumpers = (segments) => {
-  const jumps = []
-  for (let i = 0; i < segments.length; i += 1) {
-    for (let j = i + 1; j < segments.length; j += 1) {
-      const a = segments[i]
-      const b = segments[j]
-      if (a.horizontal === b.horizontal) continue
-      const horizontal = a.horizontal ? a : b
-      const vertical = a.horizontal ? b : a
-      const x = vertical.x1
-      const y = horizontal.y1
-      const withinX = x >= Math.min(horizontal.x1, horizontal.x2) && x <= Math.max(horizontal.x1, horizontal.x2)
-      const withinY = y >= Math.min(vertical.y1, vertical.y2) && y <= Math.max(vertical.y1, vertical.y2)
-      if (withinX && withinY) {
-        jumps.push({ x, y })
-      }
-    }
-  }
-  return jumps
-}
-
-export function EdgeLayer({ diagram, columns, columnRefs, nodeRefs, canvasRef, version }) {
+export function EdgeLayer({ diagram, columns, columnRefs, nodeRefs, canvasRef, version, onDeleteEdge }) {
   const [size, setSize] = useState({ width: 0, height: 0 })
 
   const nodeRects = useMemo(() => {
@@ -95,8 +55,6 @@ export function EdgeLayer({ diagram, columns, columnRefs, nodeRefs, canvasRef, v
     }
   }, [debug])
 
-  const jumpers = useMemo(() => findJumpers(buildSegments(routes)), [routes])
-
   useEffect(() => {
     if (!canvasRef.current) return
     const observer = new ResizeObserver(() => {
@@ -125,10 +83,12 @@ export function EdgeLayer({ diagram, columns, columnRefs, nodeRefs, canvasRef, v
           strokeWidth="2.5"
           strokeLinejoin="round"
           markerEnd={route.markerEnd ? 'url(#arrowhead)' : undefined}
+          onContextMenu={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onDeleteEdge?.(route.id)
+          }}
         />
-      ))}
-      {jumpers.map((jump, idx) => (
-        <path key={`jump-${idx}`} d={`M ${jump.x} ${jump.y - 6} A 6 6 0 0 1 ${jump.x} ${jump.y + 6}`} fill="none" stroke={strokeColor} strokeWidth="2.5" />
       ))}
     </svg>
   )

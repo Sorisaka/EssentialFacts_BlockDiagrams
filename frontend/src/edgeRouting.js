@@ -1,13 +1,49 @@
 const LANE_SPACING = 10
 
 // Rect helper: returns the geometric center of a node box
-const center = (rect) => ({ x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 })
+const getRectCenter = (rect) => ({ x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 })
 
-// Places an anchor on the requested side of a rectangle, clamped to the frame
-const computeAnchor = (rect, side, y) => ({
-  x: side === 'left' ? rect.left : rect.right,
-  y: y ?? center(rect).y,
-})
+// Intersects a half-line from fromPoint to toPoint with the border of an axis-aligned rectangle
+// and returns the closest intersection point.
+const intersectRayWithRectBorder = (fromPoint, toPoint, rect, offset = 0) => {
+  const dx = toPoint.x - fromPoint.x
+  const dy = toPoint.y - fromPoint.y
+  const candidates = []
+
+  if (dx !== 0) {
+    const tLeft = (rect.left - fromPoint.x) / dx
+    const yLeft = fromPoint.y + tLeft * dy
+    if (tLeft > 0 && yLeft >= rect.top && yLeft <= rect.bottom) candidates.push({ t: tLeft, x: rect.left, y: yLeft })
+
+    const tRight = (rect.right - fromPoint.x) / dx
+    const yRight = fromPoint.y + tRight * dy
+    if (tRight > 0 && yRight >= rect.top && yRight <= rect.bottom) candidates.push({ t: tRight, x: rect.right, y: yRight })
+  }
+
+  if (dy !== 0) {
+    const tTop = (rect.top - fromPoint.y) / dy
+    const xTop = fromPoint.x + tTop * dx
+    if (tTop > 0 && xTop >= rect.left && xTop <= rect.right) candidates.push({ t: tTop, x: xTop, y: rect.top })
+
+    const tBottom = (rect.bottom - fromPoint.y) / dy
+    const xBottom = fromPoint.x + tBottom * dx
+    if (tBottom > 0 && xBottom >= rect.left && xBottom <= rect.right)
+      candidates.push({ t: tBottom, x: xBottom, y: rect.bottom })
+  }
+
+  if (!candidates.length) return fromPoint
+  candidates.sort((a, b) => a.t - b.t)
+  const intersection = candidates[0]
+
+  if (offset !== 0 && (dx !== 0 || dy !== 0)) {
+    const len = Math.sqrt(dx * dx + dy * dy) || 1
+    const ox = (dx / len) * offset
+    const oy = (dy / len) * offset
+    return { x: intersection.x + ox, y: intersection.y + oy }
+  }
+
+  return { x: intersection.x, y: intersection.y }
+}
 
 const nextLaneOffset = (index) => index * LANE_SPACING
 
@@ -77,11 +113,11 @@ export function computeEdgeRoutes(diagram, columns, nodeRects, boundaries) {
     const sourceRect = nodeRects[source.id]
     const targetRect = nodeRects[target.id]
     if (!sourceRect || !targetRect) return
-    const sourceCenter = center(sourceRect)
-    const targetCenter = center(targetRect)
+    const sourceCenter = getRectCenter(sourceRect)
+    const targetCenter = getRectCenter(targetRect)
     const direction = sourceCenter.x <= targetCenter.x ? 'ltr' : 'rtl'
-    const sourceAnchor = computeAnchor(sourceRect, direction === 'ltr' ? 'right' : 'left', sourceCenter.y)
-    const targetAnchor = computeAnchor(targetRect, direction === 'ltr' ? 'left' : 'right', targetCenter.y)
+    const sourceAnchor = intersectRayWithRectBorder(sourceCenter, targetCenter, sourceRect)
+    const targetAnchor = intersectRayWithRectBorder(targetCenter, sourceCenter, targetRect)
     edges.push({ edge, source, target, direction, sourceAnchor, targetAnchor })
   })
 
