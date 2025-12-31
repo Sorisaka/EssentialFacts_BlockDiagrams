@@ -3,46 +3,13 @@ const LANE_SPACING = 10
 // Rect helper: returns the geometric center of a node box
 const getRectCenter = (rect) => ({ x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 })
 
-// Intersects a half-line from fromPoint to toPoint with the border of an axis-aligned rectangle
-// and returns the closest intersection point.
-const intersectRayWithRectBorder = (fromPoint, toPoint, rect, offset = 0) => {
-  const dx = toPoint.x - fromPoint.x
-  const dy = toPoint.y - fromPoint.y
-  const candidates = []
-
-  if (dx !== 0) {
-    const tLeft = (rect.left - fromPoint.x) / dx
-    const yLeft = fromPoint.y + tLeft * dy
-    if (tLeft > 0 && yLeft >= rect.top && yLeft <= rect.bottom) candidates.push({ t: tLeft, x: rect.left, y: yLeft })
-
-    const tRight = (rect.right - fromPoint.x) / dx
-    const yRight = fromPoint.y + tRight * dy
-    if (tRight > 0 && yRight >= rect.top && yRight <= rect.bottom) candidates.push({ t: tRight, x: rect.right, y: yRight })
+const anchorInfoForRect = (rect) => {
+  const center = getRectCenter(rect)
+  return {
+    center,
+    inAnchor: { x: rect.left, y: center.y },
+    outAnchor: { x: rect.right, y: center.y },
   }
-
-  if (dy !== 0) {
-    const tTop = (rect.top - fromPoint.y) / dy
-    const xTop = fromPoint.x + tTop * dx
-    if (tTop > 0 && xTop >= rect.left && xTop <= rect.right) candidates.push({ t: tTop, x: xTop, y: rect.top })
-
-    const tBottom = (rect.bottom - fromPoint.y) / dy
-    const xBottom = fromPoint.x + tBottom * dx
-    if (tBottom > 0 && xBottom >= rect.left && xBottom <= rect.right)
-      candidates.push({ t: tBottom, x: xBottom, y: rect.bottom })
-  }
-
-  if (!candidates.length) return fromPoint
-  candidates.sort((a, b) => a.t - b.t)
-  const intersection = candidates[0]
-
-  if (offset !== 0 && (dx !== 0 || dy !== 0)) {
-    const len = Math.sqrt(dx * dx + dy * dy) || 1
-    const ox = (dx / len) * offset
-    const oy = (dy / len) * offset
-    return { x: intersection.x + ox, y: intersection.y + oy }
-  }
-
-  return { x: intersection.x, y: intersection.y }
 }
 
 const nextLaneOffset = (index) => index * LANE_SPACING
@@ -80,7 +47,9 @@ const buildRoute = (edge, junction, boundaries, laneIndex = 0) => {
   const trunkOffset = nextLaneOffset(laneIndex)
   const junctionX = junction?.junctionX != null ? junction.junctionX : (sourceBoundaryX + targetBoundaryX) / 2
   const shiftedJunctionX =
-    direction === 'ltr' ? Math.min(junctionX, targetBoundaryX - trunkOffset) : Math.max(junctionX, targetBoundaryX + trunkOffset)
+    direction === 'ltr'
+      ? Math.min(junctionX, targetBoundaryX - trunkOffset)
+      : Math.max(junctionX, targetBoundaryX + trunkOffset)
   const junctionY = junction?.junctionY ?? (sourceAnchor.y + targetAnchor.y) / 2
 
   const points = dedupePoints([
@@ -96,7 +65,6 @@ const buildRoute = (edge, junction, boundaries, laneIndex = 0) => {
   return {
     id: edge.edge.id,
     points,
-    markerEnd: 'arrowhead',
     targetId: target.id,
   }
 }
@@ -104,20 +72,21 @@ const buildRoute = (edge, junction, boundaries, laneIndex = 0) => {
 export function computeEdgeRoutes(diagram, columns, nodeRects, boundaries) {
   if (!diagram || !columns?.length) return { routes: [], debug: [] }
   const nodeById = Object.fromEntries(diagram.nodes.map((n) => [n.id, n]))
+  const anchorMap = Object.fromEntries(
+    Object.entries(nodeRects).map(([nodeId, rect]) => [nodeId, anchorInfoForRect(rect)])
+  )
   const edges = []
 
   diagram.edges.forEach((edge) => {
     const source = nodeById[edge.fromNodeId]
     const target = nodeById[edge.toNodeId]
     if (!source || !target) return
-    const sourceRect = nodeRects[source.id]
-    const targetRect = nodeRects[target.id]
-    if (!sourceRect || !targetRect) return
-    const sourceCenter = getRectCenter(sourceRect)
-    const targetCenter = getRectCenter(targetRect)
-    const direction = sourceCenter.x <= targetCenter.x ? 'ltr' : 'rtl'
-    const sourceAnchor = intersectRayWithRectBorder(sourceCenter, targetCenter, sourceRect)
-    const targetAnchor = intersectRayWithRectBorder(targetCenter, sourceCenter, targetRect)
+    const sourceAnchors = anchorMap[source.id]
+    const targetAnchors = anchorMap[target.id]
+    if (!sourceAnchors || !targetAnchors) return
+    const direction = sourceAnchors.center.x <= targetAnchors.center.x ? 'ltr' : 'rtl'
+    const sourceAnchor = sourceAnchors.outAnchor
+    const targetAnchor = targetAnchors.inAnchor
     edges.push({ edge, source, target, direction, sourceAnchor, targetAnchor })
   })
 
