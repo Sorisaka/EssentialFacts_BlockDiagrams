@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { MarkSelector, MARKS } from './components/MarkSelector'
 import { TemplateList } from './components/TemplateList'
 import { PropertiesPanel } from './components/PropertiesPanel'
@@ -14,6 +14,47 @@ const COLUMN_MIN_WIDTH = 360
 
 const HIRAGANA = 'あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん'.split('')
 const KATAKANA = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン'.split('')
+const ROMAN = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
+
+const classifyLabel = (label) => {
+  if (!label) return 'other'
+  const first = label[0]
+  if (HIRAGANA.includes(first)) return 'hiragana'
+  if (KATAKANA.includes(first)) return 'katakana'
+  if (/^[0-9]+$/.test(label)) return 'number'
+  if (/^[A-Za-z]+$/.test(label)) return 'roman'
+  return 'other'
+}
+
+const nextFromSeq = (seq, used, counter) => {
+  let idx = counter.current
+  while (true) {
+    const candidate = nextLabel(seq, idx)
+    idx += 1
+    if (!used.has(candidate)) {
+      counter.current = idx
+      return candidate
+    }
+  }
+}
+
+const nextNumber = (used, counter) => {
+  let n = counter.current
+  while (used.has(String(n))) {
+    n += 1
+  }
+  counter.current = n + 1
+  return String(n)
+}
+
+const nextRoman = (used, counter) => nextFromSeq(ROMAN, used, counter)
+
+const nextOther = (base, used) => {
+  if (!used.has(base)) return base
+  let n = 2
+  while (used.has(`${base}${n}`)) n += 1
+  return `${base}${n}`
+}
 
 const createDefaultDiagram = () => {
   const columnId = uid()
@@ -58,11 +99,33 @@ const nextLabel = (seq, index) => {
   return cycle === 0 ? base : `${base}${cycle + 1}`
 }
 
+// Enforces item labels to be unique per parity (奇数/偶数列) and per label type
 const ensureItemLabels = (diagram) => {
   const columnOrder = [...diagram.columns].sort((a, b) => a.order - b.order)
   const columnIndexMap = Object.fromEntries(columnOrder.map((col, idx) => [col.id, idx]))
-  let hiraIndex = 0
-  let kataIndex = 0
+  const counters = {
+    odd: {
+      hiragana: { current: 0 },
+      katakana: { current: 0 },
+      number: { current: 1 },
+      roman: { current: 0 },
+    },
+    even: {
+      hiragana: { current: 0 },
+      katakana: { current: 0 },
+      number: { current: 1 },
+      roman: { current: 0 },
+    },
+  }
+  const usedMap = {
+    odd: { hiragana: new Set(), katakana: new Set(), number: new Set(), roman: new Set(), other: new Set() },
+    even: { hiragana: new Set(), katakana: new Set(), number: new Set(), roman: new Set(), other: new Set() },
+  }
+  const markUsed = (scopeKey, label) => {
+    const type = classifyLabel(label)
+    const targetSet = usedMap[scopeKey][type] || usedMap[scopeKey].other
+    targetSet.add(label)
+  }
   let changed = false
   const nodesById = {}
 
@@ -73,13 +136,36 @@ const ensureItemLabels = (diagram) => {
     nodesInColumn.forEach((node) => {
       let nodeChanged = false
       const updatedItems = node.items.map((item) => {
-        const existing = item.label ?? ''
-        if (existing.trim()) return item
         const colIndex = columnIndexMap[col.id] ?? 0
-        const label = colIndex % 2 === 0 ? nextLabel(HIRAGANA, hiraIndex++) : nextLabel(KATAKANA, kataIndex++)
-        nodeChanged = true
-        changed = true
-        return { ...item, label }
+        const scopeKey = colIndex % 2 === 0 ? 'even' : 'odd'
+        const existing = (item.label ?? '').trim()
+        const labelType = classifyLabel(existing)
+        const used = usedMap[scopeKey][labelType] || usedMap[scopeKey].other
+
+        const pickLabel = () => {
+          if (labelType === 'hiragana') return nextFromSeq(HIRAGANA, used, counters[scopeKey].hiragana)
+          if (labelType === 'katakana') return nextFromSeq(KATAKANA, used, counters[scopeKey].katakana)
+          if (labelType === 'number') return nextNumber(used, counters[scopeKey].number)
+          if (labelType === 'roman') return nextRoman(used, counters[scopeKey].roman)
+          return nextOther(existing || nextFromSeq(HIRAGANA, used, counters[scopeKey].hiragana), used)
+        }
+
+        let label = existing
+        if (!label) {
+          label = scopeKey === 'even'
+            ? nextFromSeq(HIRAGANA, usedMap[scopeKey].hiragana, counters[scopeKey].hiragana)
+            : nextFromSeq(KATAKANA, usedMap[scopeKey].katakana, counters[scopeKey].katakana)
+        } else if (used.has(label)) {
+          label = pickLabel()
+        }
+
+        markUsed(scopeKey, label)
+        if (label !== item.label) {
+          nodeChanged = true
+          changed = true
+          return { ...item, label }
+        }
+        return item
       })
       if (nodeChanged) {
         nodesById[node.id] = { ...node, items: updatedItems }
@@ -133,6 +219,11 @@ export default function App() {
   const nodeHeightsRef = useRef({})
   const layoutJob = useRef(null)
   const canvasRef = useRef(null)
+  const dragState = useRef({ active: false, nodeId: null, startY: 0, pointerStartY: 0, pendingY: null })
+  const dragFrame = useRef(null)
+  const isDraggingRef = useRef(false)
+  const requestLayoutRef = useRef(null)
+  const updateDiagramRef = useRef(null)
 
   useLayoutEffect(() => {
     columnRefs.current = {}
@@ -238,10 +329,16 @@ export default function App() {
     if (layoutJob.current) cancelAnimationFrame(layoutJob.current)
     layoutJob.current = requestAnimationFrame(() => {
       layoutJob.current = null
-      resolveCollisions()
+      if (!isDraggingRef.current) {
+        resolveCollisions()
+      }
       setLayoutVersion((v) => v + 1)
     })
   }
+
+  useEffect(() => {
+    requestLayoutRef.current = requestLayout
+  }, [requestLayout])
 
   useEffect(() => {
     const { diagram: withLabels, changed } = ensureItemLabels(currentDiagram)
@@ -284,6 +381,10 @@ export default function App() {
       return next
     })
   }
+
+  useEffect(() => {
+    updateDiagramRef.current = updateDiagram
+  }, [updateDiagram])
 
   const syncDiagramListName = (diagram) => {
     setDiagramList((prev) => {
@@ -594,6 +695,82 @@ export default function App() {
     setSelected({ type: 'node', id: node.id, columnId })
   }
 
+  const applyDragUpdate = useCallback(() => {
+    const { nodeId, pendingY } = dragState.current
+    if (!nodeId || pendingY == null) return
+    updateDiagramRef.current((prev) => ({
+      ...prev,
+      nodes: prev.nodes.map((node) =>
+        node.id === nodeId ? { ...node, y: pendingY, row: Math.round(pendingY / DEFAULT_ROW_HEIGHT) } : node
+      ),
+    }))
+    requestLayoutRef.current?.()
+  }, [])
+
+  const handleNodePointerMove = useCallback(
+    (event) => {
+      const state = dragState.current
+      if (!state.active) return
+      event.preventDefault()
+      const delta = event.clientY - state.pointerStartY
+      const nextY = Math.max(0, snap(state.startY + delta))
+      if (state.pendingY === nextY) return
+      state.pendingY = nextY
+      if (!dragFrame.current) {
+        dragFrame.current = requestAnimationFrame(() => {
+          dragFrame.current = null
+          applyDragUpdate()
+        })
+      }
+    },
+    [applyDragUpdate]
+  )
+
+  const handleNodePointerUp = useCallback(
+    (event) => {
+      if (dragState.current.active) {
+        if (event) handleNodePointerMove(event)
+        dragState.current = { active: false, nodeId: null, startY: 0, pointerStartY: 0, pendingY: null }
+        isDraggingRef.current = false
+        window.removeEventListener('pointermove', handleNodePointerMove)
+        window.removeEventListener('pointerup', handleNodePointerUp)
+        window.removeEventListener('pointercancel', handleNodePointerUp)
+        requestLayoutRef.current?.()
+      }
+    },
+    [handleNodePointerMove]
+  )
+
+  const handleNodeDragStart = useCallback(
+    (event, node) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      setSelected({ type: 'node', id: node.id, columnId: node.columnId })
+      dragState.current = {
+        active: true,
+        nodeId: node.id,
+        startY: node.y ?? 0,
+        pointerStartY: event.clientY,
+        pendingY: node.y ?? 0,
+      }
+      isDraggingRef.current = true
+      window.addEventListener('pointermove', handleNodePointerMove)
+      window.addEventListener('pointerup', handleNodePointerUp)
+      window.addEventListener('pointercancel', handleNodePointerUp)
+    },
+    [handleNodePointerMove, handleNodePointerUp]
+  )
+
+  useEffect(() => {
+    return () => {
+      window.removeEventListener('pointermove', handleNodePointerMove)
+      window.removeEventListener('pointerup', handleNodePointerUp)
+      window.removeEventListener('pointercancel', handleNodePointerUp)
+      if (dragFrame.current) cancelAnimationFrame(dragFrame.current)
+    }
+  }, [handleNodePointerMove, handleNodePointerUp])
+
   const resolveCollisions = () => {
     const heights = nodeHeightsRef.current
     const updatedNodes = [...currentDiagram.nodes]
@@ -716,6 +893,7 @@ export default function App() {
             nodeRefs={nodeRefs}
             canvasRef={canvasRef}
             version={layoutVersion}
+            onDeleteEdge={handleDeleteEdge}
           />
           <div className="columns">
             {sortedColumns.map((column) => {
@@ -755,6 +933,12 @@ export default function App() {
                         onClick={() => handleSelectNode(node, column.id)}
                         style={{ top: `${node.y ?? 0}px` }}
                       >
+                        <div className="node-handle" onPointerDown={(event) => handleNodeDragStart(event, node)}>
+                          <span aria-hidden className="node-handle__grip">
+                            ⇅
+                          </span>
+                          <span className="node-handle__hint">ドラッグで上下移動</span>
+                        </div>
                         <input
                           className="node-title"
                           value={node.title}

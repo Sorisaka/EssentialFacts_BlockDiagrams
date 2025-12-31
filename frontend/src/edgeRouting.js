@@ -1,107 +1,159 @@
 const LANE_SPACING = 10
 
-const centerY = (rect) => (rect.top + rect.bottom) / 2
+// Rect helper: returns the geometric center of a node box
+const getRectCenter = (rect) => ({ x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 })
 
-const getPort = (rect, side) => ({
-  x: side === 'left' ? rect.left : rect.right,
-  y: centerY(rect),
-})
+const anchorInfoForRect = (rect) => {
+  const center = getRectCenter(rect)
+  return {
+    center,
+    inAnchor: { x: rect.left, y: center.y },
+    outAnchor: { x: rect.right, y: center.y },
+  }
+}
 
 const nextLaneOffset = (index) => index * LANE_SPACING
 
+const manhattan = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y)
+
+const dedupePoints = (points) =>
+  points.filter((p, idx) => {
+    if (idx === 0) return true
+    const prev = points[idx - 1]
+    return prev.x !== p.x || prev.y !== p.y
+  })
+
+// Pick a junction based on the shortest edge in the group so the shared trunk stays compact
+const junctionForGroup = (edges, sourceBoundary, targetBoundary) => {
+  if (!edges.length) return null
+  const shortest = edges.reduce((acc, cur) => {
+    const distance = manhattan(cur.sourceAnchor, cur.targetAnchor)
+    if (!acc || distance < acc.distance) return { ...cur, distance }
+    return acc
+  }, null)
+  const gapStart = sourceBoundary ?? shortest.sourceAnchor.x
+  const gapEnd = targetBoundary ?? shortest.targetAnchor.x
+  const junctionX = (gapStart + gapEnd) / 2
+  const junctionY = (shortest.sourceAnchor.y + shortest.targetAnchor.y) / 2
+  return { junctionX, junctionY }
+}
+
+const buildRoute = (edge, junction, boundaries, laneIndex = 0) => {
+  const { direction, source, target, sourceAnchor, targetAnchor } = edge
+  const sourceBoundaryX = direction === 'ltr' ? boundaries[source.columnId]?.right : boundaries[source.columnId]?.left
+  const targetBoundaryX = direction === 'ltr' ? boundaries[target.columnId]?.left : boundaries[target.columnId]?.right
+  if (sourceBoundaryX == null || targetBoundaryX == null) return null
+
+  const trunkOffset = nextLaneOffset(laneIndex)
+  const junctionX = junction?.junctionX != null ? junction.junctionX : (sourceBoundaryX + targetBoundaryX) / 2
+  const shiftedJunctionX =
+    direction === 'ltr'
+      ? Math.min(junctionX, targetBoundaryX - trunkOffset)
+      : Math.max(junctionX, targetBoundaryX + trunkOffset)
+  const junctionY = junction?.junctionY ?? (sourceAnchor.y + targetAnchor.y) / 2
+
+  const points = dedupePoints([
+    sourceAnchor,
+    { x: sourceBoundaryX, y: sourceAnchor.y },
+    { x: shiftedJunctionX, y: sourceAnchor.y },
+    { x: shiftedJunctionX, y: junctionY },
+    { x: shiftedJunctionX, y: targetAnchor.y },
+    { x: targetBoundaryX, y: targetAnchor.y },
+    targetAnchor,
+  ])
+
+  return {
+    id: edge.edge.id,
+    points,
+    targetId: target.id,
+  }
+}
+
 export function computeEdgeRoutes(diagram, columns, nodeRects, boundaries) {
   if (!diagram || !columns?.length) return { routes: [], debug: [] }
-  const columnOrder = {}
-  columns.forEach((c, idx) => {
-    columnOrder[c.id] = idx
-  })
   const nodeById = Object.fromEntries(diagram.nodes.map((n) => [n.id, n]))
-  const groups = {}
+  const anchorMap = Object.fromEntries(
+    Object.entries(nodeRects).map(([nodeId, rect]) => [nodeId, anchorInfoForRect(rect)])
+  )
+  const edges = []
 
   diagram.edges.forEach((edge) => {
     const source = nodeById[edge.fromNodeId]
     const target = nodeById[edge.toNodeId]
     if (!source || !target) return
-    const sourceRect = nodeRects[source.id]
-    const targetRect = nodeRects[target.id]
-    if (!sourceRect || !targetRect) return
-    const direction =
-      edge.direction && edge.direction !== 'auto'
-        ? edge.direction
-        : columnOrder[source.columnId] <= columnOrder[target.columnId]
-        ? 'ltr'
-        : 'rtl'
-    const sourcePort = direction === 'ltr' ? getPort(sourceRect, 'right') : getPort(sourceRect, 'left')
-    const targetPort = direction === 'ltr' ? getPort(targetRect, 'left') : getPort(targetRect, 'right')
-    const columnBoundary = boundaries?.[target.columnId]
-    if (!columnBoundary) return
-    const groupKey = `${target.id}-${direction}`
-    if (!groups[groupKey]) {
-      groups[groupKey] = { target, direction, edges: [], targetPort, columnBoundary }
-    }
-    groups[groupKey].edges.push({ edge, sourcePort, targetPort })
+    const sourceAnchors = anchorMap[source.id]
+    const targetAnchors = anchorMap[target.id]
+    if (!sourceAnchors || !targetAnchors) return
+    const direction = sourceAnchors.center.x <= targetAnchors.center.x ? 'ltr' : 'rtl'
+    const sourceAnchor = sourceAnchors.outAnchor
+    const targetAnchor = targetAnchors.inAnchor
+    edges.push({ edge, source, target, direction, sourceAnchor, targetAnchor })
   })
 
-  const laneOrderByColumn = {}
-  Object.values(groups).forEach((group) => {
-    const colId = group.target.columnId
-    if (!laneOrderByColumn[colId]) laneOrderByColumn[colId] = []
-    laneOrderByColumn[colId].push(group)
+  const targetGroups = {}
+  const sourceGroups = {}
+
+  edges.forEach((edge) => {
+    const targetKey = `T:${edge.target.id}:${edge.direction}`
+    const sourceKey = `S:${edge.source.id}:${edge.direction}`
+    if (!targetGroups[targetKey]) targetGroups[targetKey] = { key: targetKey, edges: [], target: edge.target }
+    if (!sourceGroups[sourceKey]) sourceGroups[sourceKey] = { key: sourceKey, edges: [], source: edge.source }
+    targetGroups[targetKey].edges.push(edge)
+    sourceGroups[sourceKey].edges.push(edge)
   })
 
-  Object.values(laneOrderByColumn).forEach((list) => {
-    list.sort((a, b) => a.targetPort.y - b.targetPort.y)
+  const laneOrderByTargetColumn = {}
+  Object.values(targetGroups).forEach((group) => {
+    const colId = group.edges[0]?.target.columnId
+    if (!colId) return
+    if (!laneOrderByTargetColumn[colId]) laneOrderByTargetColumn[colId] = []
+    laneOrderByTargetColumn[colId].push(group)
+  })
+
+  Object.values(laneOrderByTargetColumn).forEach((list) => {
+    list.sort((a, b) => {
+      const ay = a.edges[0]?.targetAnchor?.y ?? 0
+      const by = b.edges[0]?.targetAnchor?.y ?? 0
+      return ay - by
+    })
   })
 
   const routes = []
   const debug = []
 
-  Object.values(groups).forEach((group) => {
-    const { target, edges, targetPort, columnBoundary } = group
-    const laneIndex = laneOrderByColumn[target.columnId].indexOf(group)
-    const trunkX = columnBoundary.left - nextLaneOffset(laneIndex)
-    const ys = [targetPort.y, ...edges.map((e) => e.sourcePort.y)]
-    const trunkTop = Math.min(...ys)
-    const trunkBottom = Math.max(...ys)
+  edges.forEach((edge) => {
+    const targetKey = `T:${edge.target.id}:${edge.direction}`
+    const sourceKey = `S:${edge.source.id}:${edge.direction}`
+    const targetGroup = targetGroups[targetKey]
+    const sourceGroup = sourceGroups[sourceKey]
+    const useTargetGrouping = targetGroup?.edges.length >= 2
+    const useSourceGrouping = !useTargetGrouping && sourceGroup?.edges.length >= 2
 
-    debug.push({
-      targetId: target.id,
-      trunkX,
-      laneIndex,
-      laneCount: laneOrderByColumn[target.columnId].length,
-    })
+    let junction = null
+    let laneIndex = 0
+    if (useTargetGrouping) {
+      const group = targetGroup
+      const sourceBoundary = boundaries?.[edge.source.columnId]?.right
+      const targetBoundary = boundaries?.[edge.target.columnId]?.left
+      const reverseTargetBoundary = boundaries?.[edge.target.columnId]?.right
+      const sourceSide = edge.direction === 'ltr' ? sourceBoundary : boundaries?.[edge.source.columnId]?.left
+      const targetSide = edge.direction === 'ltr' ? targetBoundary : reverseTargetBoundary
+      junction = junctionForGroup(group.edges, sourceSide, targetSide)
+      laneIndex = laneOrderByTargetColumn[edge.target.columnId]?.indexOf(group) ?? 0
+      debug.push({ targetId: edge.target.id, junction })
+    } else if (useSourceGrouping) {
+      const group = sourceGroup
+      const sourceBoundary = boundaries?.[edge.source.columnId]?.right
+      const sourceBoundaryLeft = boundaries?.[edge.source.columnId]?.left
+      const targetBoundary = boundaries?.[edge.target.columnId]?.left
+      const targetBoundaryRight = boundaries?.[edge.target.columnId]?.right
+      const sourceSide = edge.direction === 'ltr' ? sourceBoundary : sourceBoundaryLeft
+      const targetSide = edge.direction === 'ltr' ? targetBoundary : targetBoundaryRight
+      junction = junctionForGroup(group.edges, sourceSide, targetSide)
+    }
 
-    routes.push({
-      id: `${target.id}-trunk-${group.direction}-${laneIndex}`,
-      points: [
-        { x: trunkX, y: trunkTop },
-        { x: trunkX, y: trunkBottom },
-      ],
-      markerEnd: null,
-      targetId: target.id,
-    })
-
-    edges.forEach((item) => {
-      routes.push({
-        id: item.edge.id,
-        points: [
-          { x: item.sourcePort.x, y: item.sourcePort.y },
-          { x: trunkX, y: item.sourcePort.y },
-        ],
-        markerEnd: null,
-        targetId: target.id,
-      })
-    })
-
-    routes.push({
-      id: `${target.id}-into-${group.direction}-${laneIndex}`,
-      points: [
-        { x: trunkX, y: targetPort.y },
-        { x: targetPort.x, y: targetPort.y },
-      ],
-      markerEnd: 'arrowhead',
-      targetId: target.id,
-    })
+    const route = buildRoute(edge, junction, boundaries, laneIndex)
+    if (route) routes.push(route)
   })
 
   return { routes, debug }
