@@ -10,6 +10,8 @@ class Mark(str, Enum):
     circle = "circle"
     triangle = "triangle"
     cross = "cross"
+    square = "square"
+    check = "check"
     ken = "ken"
     none = "none"
 
@@ -18,6 +20,7 @@ class NodeItem(BaseModel):
     id: str
     text: str
     mark: Mark = Mark.none
+    label: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -25,6 +28,7 @@ class Node(BaseModel):
     id: str
     columnId: str
     row: int = 0
+    y: float = 0
     title: str
     items: List[NodeItem] = Field(default_factory=list)
     ui: Optional[dict] = None
