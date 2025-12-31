@@ -51,12 +51,13 @@ export function PropertiesPanel({ selected, diagram, onUpdateColumn, onUpdateNod
             <input value={node.title} onChange={(e) => onUpdateNode(node.id, { title: e.target.value })} />
           </label>
           <label>
-            行番号
+            Y座標 (px)
             <input
               type="number"
-              value={node.row}
-              onChange={(e) => onUpdateNode(node.id, { row: Number(e.target.value) })}
+              value={Math.round(node.y ?? node.row * 140)}
+              onChange={(e) => onUpdateNode(node.id, { y: Number(e.target.value) })}
               min={0}
+              step={8}
             />
           </label>
 

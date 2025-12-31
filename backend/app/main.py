@@ -12,6 +12,7 @@ from .models import (
     Column,
     Diagram,
     DiagramSummary,
+    Node,
     TemplateItem,
     TemplateSet,
 )
@@ -55,6 +56,10 @@ NODE_PADDING = 10
 TITLE_HEIGHT = 18
 ITEM_LINE_HEIGHT = 20
 
+
+def _node_height(node: Node) -> float:
+    return NODE_PADDING * 2 + TITLE_HEIGHT + len(node.items) * ITEM_LINE_HEIGHT
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "*"],
@@ -66,12 +71,17 @@ app.add_middleware(
 
 def _diagram_dimensions(diagram: Diagram) -> Tuple[float, float, List[Column]]:
     sorted_columns = sorted(diagram.columns, key=lambda c: c.order)
-    max_row = max([node.row for node in diagram.nodes], default=-1)
-    total_rows = max(diagram.rowCount, max_row + 1, 1)
     width = CANVAS_PADDING * 2 + len(sorted_columns) * COLUMN_WIDTH
     if len(sorted_columns) > 1:
         width += (len(sorted_columns) - 1) * COLUMN_GAP
-    height = CANVAS_PADDING * 2 + total_rows * ROW_HEIGHT
+    column_heights: List[float] = []
+    for column in sorted_columns:
+        col_nodes = [n for n in diagram.nodes if n.columnId == column.id]
+        bottoms = [getattr(node, "y", node.row * ROW_HEIGHT) + _node_height(node) for node in col_nodes]
+        max_bottom = max(bottoms) if bottoms else diagram.rowCount * ROW_HEIGHT
+        column_heights.append(max_bottom)
+    max_height = max(column_heights + [diagram.rowCount * ROW_HEIGHT, ROW_HEIGHT])
+    height = CANVAS_PADDING * 2 + max_height
     return width, height, sorted_columns
 
 
@@ -98,11 +108,7 @@ def _build_routes(
     diagram: Diagram,
     column_ids: List[str],
     boundaries: Dict[str, Tuple[float, float]],
-    row_midlines: List[float],
 ) -> Tuple[List[Dict], List[Dict]]:
-    if not row_midlines:
-        return [], []
-
     column_order = {cid: idx for idx, cid in enumerate(column_ids)}
     node_by_id = {node.id: node for node in diagram.nodes}
     port_by_node: Dict[str, Dict[str, Dict[str, float]]] = {}
@@ -110,10 +116,11 @@ def _build_routes(
         boundary = boundaries.get(node.columnId)
         if not boundary:
             continue
-        row_y = row_midlines[node.row] if node.row < len(row_midlines) else row_midlines[-1]
+        top_y = getattr(node, "y", node.row * ROW_HEIGHT)
+        center_y = CANVAS_PADDING + top_y + _node_height(node) / 2
         port_by_node[node.id] = {
-            "inPort": {"x": boundary[0], "y": row_y},
-            "outPort": {"x": boundary[1], "y": row_y},
+            "inPort": {"x": boundary[0], "y": center_y},
+            "outPort": {"x": boundary[1], "y": center_y},
         }
 
     grouped: Dict[str, Dict[str, object]] = {}
@@ -158,20 +165,21 @@ def _build_routes(
         if candidate_x is None:
             continue
 
-        best = None
         target_y = (
             port_by_node.get(target.id, {}).get("inPort", {}).get("y")
             if direction == "ltr"
             else port_by_node.get(target.id, {}).get("outPort", {}).get("y")
         )
-        for y in row_midlines:
+        candidates = [target_y] + [item["sourcePort"]["y"] for item in edges]
+        best = {"y": target_y, "cost": float("inf")}
+        for y in candidates:
             cost = abs((target_y or y) - y)
             for item in edges:
                 cost += abs(item["sourcePort"]["x"] - candidate_x) + abs(item["sourcePort"]["y"] - y)
-            if not best or cost < best["cost"] or (cost == best["cost"] and y < best["y"]):
+            if cost < best["cost"]:
                 best = {"y": y, "cost": cost}
 
-        merge_point = {"x": candidate_x, "y": best["y"] if best else row_midlines[0]}
+        merge_point = {"x": candidate_x, "y": best["y"] if best else target_y}
         merge_dots.append(merge_point)
 
         trunk_target = (
@@ -236,11 +244,14 @@ def _render_pdf(diagram: Diagram, pdf_path: Path) -> Path:
     if reportlab is None or canvas is None or colors is None or A4 is None:
         raise HTTPException(status_code=503, detail="PDF engine unavailable")
 
-    total_rows = max(diagram.rowCount, max([n.row for n in diagram.nodes], default=-1) + 1, 1)
-    row_midlines = _row_midlines(total_rows)
     column_ids = [c.id for c in sorted_columns]
     boundaries = {cid: (x, x + COLUMN_WIDTH) for cid, x in _column_positions(column_ids).items()}
-    routes, merge_dots = _build_routes(diagram, column_ids, boundaries, row_midlines)
+    routes, merge_dots = _build_routes(diagram, column_ids, boundaries)
+    max_height = max(
+        [getattr(node, "y", node.row * ROW_HEIGHT) + _node_height(node) for node in diagram.nodes]
+        + [diagram.rowCount * ROW_HEIGHT, ROW_HEIGHT]
+    )
+    total_rows = max(int(max_height / ROW_HEIGHT), 1)
     jumpers = _find_jumpers(routes)
 
     pdf = canvas.Canvas(str(pdf_path), pagesize=landscape(A4))
@@ -274,9 +285,9 @@ def _render_pdf(diagram: Diagram, pdf_path: Path) -> Path:
     pdf.setStrokeColor(colors.HexColor("#e2e8f0"))
     for node in diagram.nodes:
         col_x = boundaries.get(node.columnId, (CANVAS_PADDING, CANVAS_PADDING))[0]
-        row_top = CANVAS_PADDING + node.row * ROW_HEIGHT
-        node_height = NODE_PADDING * 2 + TITLE_HEIGHT + len(node.items) * ITEM_LINE_HEIGHT
-        y = row_top + (ROW_HEIGHT - node_height) / 2
+        top_y = CANVAS_PADDING + getattr(node, "y", node.row * ROW_HEIGHT)
+        node_height = _node_height(node)
+        y = top_y
         node_width = COLUMN_WIDTH - COLUMN_PADDING * 2
         x = col_x + COLUMN_PADDING
         pdf.roundRect(x, y, node_width, node_height, 8, stroke=1, fill=1)

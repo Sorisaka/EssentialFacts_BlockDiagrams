@@ -1,19 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 
 const strokeColor = '#475569'
-
-const getRowMetrics = (canvasEl, columns, rows) => {
-  const firstColumn = columns[0]
-  if (!firstColumn) return { yStart: 0, rowHeight: 140 }
-  const rowGuideLine = canvasEl.querySelector('.row-guides__line')
-  const defaultHeight = 140
-  if (!rowGuideLine) return { yStart: 0, rowHeight: defaultHeight }
-  const guideRect = rowGuideLine.getBoundingClientRect()
-  const canvasRect = canvasEl.getBoundingClientRect()
-  const rowHeight = guideRect.height || defaultHeight
-  const yStart = guideRect.top - canvasRect.top + canvasEl.scrollTop
-  return { yStart, rowHeight }
-}
+const ANCHOR_PAD = 8
 
 const routeSingleEdge = (from, to) => {
   if (!from || !to) return []
@@ -21,19 +9,29 @@ const routeSingleEdge = (from, to) => {
   return [from, { x: from.x, y: to.y }, to]
 }
 
-const buildRoutes = (diagram, columns, rows, boundaries, rowMidlines) => {
-  if (!rowMidlines.length) return { routes: [], mergeDots: [] }
+const clamp = (v, min, max) => Math.max(min, Math.min(max, v))
+
+const getAnchorPoint = (rect, side, preferredY) => {
+  if (!rect) return null
+  const y = clamp(preferredY, rect.top + ANCHOR_PAD, rect.bottom - ANCHOR_PAD)
+  if (side === 'left') return { x: rect.left, y }
+  if (side === 'right') return { x: rect.right, y }
+  if (side === 'top') return { x: clamp(rect.left + (rect.width || 0) / 2, rect.left + ANCHOR_PAD, rect.right - ANCHOR_PAD), y: rect.top }
+  return { x: clamp(rect.left + (rect.width || 0) / 2, rect.left + ANCHOR_PAD, rect.right - ANCHOR_PAD), y: rect.bottom }
+}
+
+const buildRoutes = (diagram, columns, nodeRects) => {
   const columnOrder = {}
   columns.forEach((c, idx) => (columnOrder[c.id] = idx))
   const nodeById = Object.fromEntries(diagram.nodes.map((n) => [n.id, n]))
   const portByNode = {}
   diagram.nodes.forEach((node) => {
-    const boundary = boundaries[node.columnId]
-    if (!boundary) return
-    const y = rowMidlines[node.row] ?? rowMidlines[rowMidlines.length - 1]
+    const rect = nodeRects[node.id]
+    if (!rect) return
+    const centerY = (rect.top + rect.bottom) / 2
     portByNode[node.id] = {
-      inPort: { x: boundary.left, y },
-      outPort: { x: boundary.right, y },
+      inPort: getAnchorPoint(rect, 'left', centerY),
+      outPort: getAnchorPoint(rect, 'right', centerY),
     }
   })
 
@@ -61,6 +59,9 @@ const buildRoutes = (diagram, columns, rows, boundaries, rowMidlines) => {
 
   Object.values(grouped).forEach((group) => {
     const { target, direction, edges } = group
+    const targetRect = nodeRects[target.id]
+    const targetPort = direction === 'ltr' ? portByNode[target.id]?.inPort : portByNode[target.id]?.outPort
+    const preferredY = targetPort?.y ?? (targetRect ? (targetRect.top + targetRect.bottom) / 2 : 0)
     if (edges.length === 1) {
       const [single] = edges
       const points = routeSingleEdge(single.sourcePort, single.targetPort)
@@ -75,20 +76,20 @@ const buildRoutes = (diagram, columns, rows, boundaries, rowMidlines) => {
 
     const candidateX = direction === 'ltr' ? portByNode[target.id]?.inPort?.x : portByNode[target.id]?.outPort?.x
     if (candidateX == null) return
-    let best = null
-    rowMidlines.forEach((y) => {
-      let cost = Math.abs(y - (direction === 'ltr' ? portByNode[target.id].inPort.y : portByNode[target.id].outPort.y))
-      edges.forEach((item) => {
-        cost += Math.abs(item.sourcePort.x - candidateX) + Math.abs(item.sourcePort.y - y)
-      })
-      if (!best || cost < best.cost || (cost === best.cost && y < best.y)) {
-        best = { y, cost }
+    const candidateYs = [preferredY, ...edges.map((item) => item.sourcePort.y)]
+    let bestY = preferredY
+    let bestCost = Number.POSITIVE_INFINITY
+    candidateYs.forEach((y) => {
+      const cost = edges.reduce((acc, item) => acc + Math.abs(item.sourcePort.y - y), Math.abs(preferredY - y))
+      if (cost < bestCost) {
+        bestCost = cost
+        bestY = y
       }
     })
-    const mergePoint = { x: candidateX, y: best?.y ?? rowMidlines[0] }
+    const mergePoint = { x: candidateX, y: bestY }
     mergeDots.push(mergePoint)
 
-    const trunkTarget = direction === 'ltr' ? portByNode[target.id].inPort : portByNode[target.id].outPort
+    const trunkTarget = targetPort
     const trunkPoints = routeSingleEdge(mergePoint, trunkTarget)
     routes.push({
       id: `${target.id}-${direction}-trunk`,
@@ -136,8 +137,8 @@ const findJumpers = (segments) => {
       const vertical = a.horizontal ? b : a
       const x = vertical.x1
       const y = horizontal.y1
-      const withinX = (x >= Math.min(horizontal.x1, horizontal.x2) && x <= Math.max(horizontal.x1, horizontal.x2))
-      const withinY = (y >= Math.min(vertical.y1, vertical.y2) && y <= Math.max(vertical.y1, vertical.y2))
+      const withinX = x >= Math.min(horizontal.x1, horizontal.x2) && x <= Math.max(horizontal.x1, horizontal.x2)
+      const withinY = y >= Math.min(vertical.y1, vertical.y2) && y <= Math.max(vertical.y1, vertical.y2)
       if (withinX && withinY) {
         jumps.push({ x, y })
       }
@@ -146,11 +147,31 @@ const findJumpers = (segments) => {
   return jumps
 }
 
-export function EdgeLayer({ diagram, columns, rows, columnRefs, canvasRef }) {
+export function EdgeLayer({ diagram, columns, columnRefs, nodeRefs, canvasRef, version }) {
   const [size, setSize] = useState({ width: 0, height: 0 })
 
-  const { boundaries, rowMidlines } = useMemo(() => {
-    if (!canvasRef.current) return { boundaries: {}, rowMidlines: [] }
+  const nodeRects = useMemo(() => {
+    if (!canvasRef.current) return {}
+    const canvasEl = canvasRef.current
+    const canvasRect = canvasEl.getBoundingClientRect()
+    const rects = {}
+    Object.entries(nodeRefs.current).forEach(([id, el]) => {
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      rects[id] = {
+        left: rect.left - canvasRect.left + canvasEl.scrollLeft,
+        right: rect.right - canvasRect.left + canvasEl.scrollLeft,
+        top: rect.top - canvasRect.top + canvasEl.scrollTop,
+        bottom: rect.bottom - canvasRect.top + canvasEl.scrollTop,
+        width: rect.width,
+        height: rect.height,
+      }
+    })
+    return rects
+  }, [nodeRefs, canvasRef, version, diagram.nodes.length])
+
+  const boundaries = useMemo(() => {
+    if (!canvasRef.current) return {}
     const canvasEl = canvasRef.current
     const canvasRect = canvasEl.getBoundingClientRect()
     const boundariesMap = {}
@@ -163,12 +184,10 @@ export function EdgeLayer({ diagram, columns, rows, columnRefs, canvasRef }) {
         right: rect.right - canvasRect.left + canvasEl.scrollLeft,
       }
     })
-    const { yStart, rowHeight } = getRowMetrics(canvasEl, columns, rows)
-    const mids = rows.map((row) => yStart + row * rowHeight + rowHeight / 2)
-    return { boundaries: boundariesMap, rowMidlines: mids }
-  }, [columns, rows, canvasRef.current])
+    return boundariesMap
+  }, [columns, columnRefs, canvasRef, version])
 
-  const { routes, mergeDots } = useMemo(() => buildRoutes(diagram, columns, rows, boundaries, rowMidlines), [diagram, columns, rows, boundaries, rowMidlines])
+  const { routes, mergeDots } = useMemo(() => buildRoutes(diagram, columns, nodeRects, boundaries), [diagram, columns, nodeRects, boundaries])
 
   const jumpers = useMemo(() => findJumpers(buildSegments(routes)), [routes])
 
