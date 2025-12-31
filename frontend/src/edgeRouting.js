@@ -1,13 +1,16 @@
 const LANE_SPACING = 10
 
 // Rect helper: returns the geometric center of a node box
-const center = (rect) => ({ x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 })
+const getRectCenter = (rect) => ({ x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 })
 
-// Places an anchor on the requested side of a rectangle, clamped to the frame
-const computeAnchor = (rect, side, y) => ({
-  x: side === 'left' ? rect.left : rect.right,
-  y: y ?? center(rect).y,
-})
+const anchorInfoForRect = (rect) => {
+  const center = getRectCenter(rect)
+  return {
+    center,
+    inAnchor: { x: rect.left, y: center.y },
+    outAnchor: { x: rect.right, y: center.y },
+  }
+}
 
 const nextLaneOffset = (index) => index * LANE_SPACING
 
@@ -44,7 +47,9 @@ const buildRoute = (edge, junction, boundaries, laneIndex = 0) => {
   const trunkOffset = nextLaneOffset(laneIndex)
   const junctionX = junction?.junctionX != null ? junction.junctionX : (sourceBoundaryX + targetBoundaryX) / 2
   const shiftedJunctionX =
-    direction === 'ltr' ? Math.min(junctionX, targetBoundaryX - trunkOffset) : Math.max(junctionX, targetBoundaryX + trunkOffset)
+    direction === 'ltr'
+      ? Math.min(junctionX, targetBoundaryX - trunkOffset)
+      : Math.max(junctionX, targetBoundaryX + trunkOffset)
   const junctionY = junction?.junctionY ?? (sourceAnchor.y + targetAnchor.y) / 2
 
   const points = dedupePoints([
@@ -60,7 +65,6 @@ const buildRoute = (edge, junction, boundaries, laneIndex = 0) => {
   return {
     id: edge.edge.id,
     points,
-    markerEnd: 'arrowhead',
     targetId: target.id,
   }
 }
@@ -68,20 +72,21 @@ const buildRoute = (edge, junction, boundaries, laneIndex = 0) => {
 export function computeEdgeRoutes(diagram, columns, nodeRects, boundaries) {
   if (!diagram || !columns?.length) return { routes: [], debug: [] }
   const nodeById = Object.fromEntries(diagram.nodes.map((n) => [n.id, n]))
+  const anchorMap = Object.fromEntries(
+    Object.entries(nodeRects).map(([nodeId, rect]) => [nodeId, anchorInfoForRect(rect)])
+  )
   const edges = []
 
   diagram.edges.forEach((edge) => {
     const source = nodeById[edge.fromNodeId]
     const target = nodeById[edge.toNodeId]
     if (!source || !target) return
-    const sourceRect = nodeRects[source.id]
-    const targetRect = nodeRects[target.id]
-    if (!sourceRect || !targetRect) return
-    const sourceCenter = center(sourceRect)
-    const targetCenter = center(targetRect)
-    const direction = sourceCenter.x <= targetCenter.x ? 'ltr' : 'rtl'
-    const sourceAnchor = computeAnchor(sourceRect, direction === 'ltr' ? 'right' : 'left', sourceCenter.y)
-    const targetAnchor = computeAnchor(targetRect, direction === 'ltr' ? 'left' : 'right', targetCenter.y)
+    const sourceAnchors = anchorMap[source.id]
+    const targetAnchors = anchorMap[target.id]
+    if (!sourceAnchors || !targetAnchors) return
+    const direction = sourceAnchors.center.x <= targetAnchors.center.x ? 'ltr' : 'rtl'
+    const sourceAnchor = sourceAnchors.outAnchor
+    const targetAnchor = targetAnchors.inAnchor
     edges.push({ edge, source, target, direction, sourceAnchor, targetAnchor })
   })
 

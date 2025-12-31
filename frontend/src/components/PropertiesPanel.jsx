@@ -50,16 +50,7 @@ export function PropertiesPanel({ selected, diagram, onUpdateColumn, onUpdateNod
             タイトル
             <input value={node.title} onChange={(e) => onUpdateNode(node.id, { title: e.target.value })} />
           </label>
-          <label>
-            Y座標 (px)
-            <input
-              type="number"
-              value={Math.round(node.y ?? node.row * 140)}
-              onChange={(e) => onUpdateNode(node.id, { y: Number(e.target.value) })}
-              min={0}
-              step={8}
-            />
-          </label>
+          <p className="muted">位置はノードのハンドルをドラッグして上下に移動します。</p>
 
           <div className="property-block">
             <div className="property-card__subheader">
